@@ -29,6 +29,10 @@ logger = logging.getLogger("nea.profile")
 
 PROFILE_TTL_SECONDS = 300.0
 
+# Render canónico del CRM para un knowledge base sin entradas (parte del
+# contrato de GET /api/bot/profile): cuenta como "sin conocimiento".
+EMPTY_KB_SENTINEL = "(knowledge base vacío)"
+
 
 @dataclass(frozen=True)
 class BusinessProfile:
@@ -52,6 +56,9 @@ def profile_from_payload(payload: dict[str, Any], default_name: str) -> Business
     """Construye el perfil desde la respuesta del CRM, tolerante a ausencias."""
     prof = payload.get("profile") or {}
     resources_raw = payload.get("resources") or []
+    kb_text = payload.get("kb") or None
+    if isinstance(kb_text, str) and kb_text.strip() == EMPTY_KB_SENTINEL:
+        kb_text = None
     resources = [
         {"label": str(r.get("label") or r.get("url") or ""), "url": str(r.get("url") or "")}
         for r in resources_raw
@@ -63,7 +70,7 @@ def profile_from_payload(payload: dict[str, Any], default_name: str) -> Business
         instructions=prof.get("instructions") or None,
         escalation_rules=prof.get("escalationRules") or None,
         greeting=prof.get("greeting") or None,
-        kb_text=payload.get("kb") or None,
+        kb_text=kb_text,
         resources=resources,
     )
 

@@ -58,6 +58,18 @@ def test_profile_from_payload_tolerante_a_vacios():
     assert not prof.has_knowledge
 
 
+def test_kb_centinela_del_crm_no_cuenta_como_conocimiento():
+    # El CRM renderiza el KB vacío como "(knowledge base vacío)" (contrato
+    # 009): eso NO es conocimiento — sin instrucciones, el chasis debe seguir
+    # advirtiendo el perfil incompleto.
+    prof = profile_from_payload(
+        {"profile": {"name": "Asistente"}, "kb": "(knowledge base vacío)", "resources": []},
+        default_name="Nea",
+    )
+    assert prof.kb_text is None
+    assert not prof.has_knowledge
+
+
 async def test_provider_cachea_el_perfil_del_crm():
     crm = FakeCrm([PAYLOAD])
     provider = ProfileProvider(crm, ttl=600)
