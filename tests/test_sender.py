@@ -48,7 +48,7 @@ async def test_409_no_se_encola(respx_mock):
     ctx = make_ctx()
     conv = await ctx.store.get_or_create_conversation(IDENTITY)
     respx_mock.post(f"{CRM_URL}/api/bot/messages").mock(
-        return_value=httpx.Response(409, json={"code": "ai_paused"})
+        return_value=httpx.Response(409, json={"error": {"code": "ai_paused"}})
     )
 
     sent = await turn._send(ctx, conv.id, CRM_CONV_ID, "hola")
@@ -105,7 +105,7 @@ async def test_sender_abandona_por_409_sin_handoff(respx_mock):
     conv = await ctx.store.get_or_create_conversation(IDENTITY)
     pid = await ctx.store.enqueue_pending_send(conv.id, CRM_CONV_ID, "texto")
     respx_mock.post(f"{CRM_URL}/api/bot/messages").mock(
-        return_value=httpx.Response(409, json={"code": "window_closed"})
+        return_value=httpx.Response(409, json={"error": {"code": "window_closed"}})
     )
     handoff = respx_mock.post(f"{CRM_URL}/api/bot/handoff").mock(
         return_value=httpx.Response(200, json={})

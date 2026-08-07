@@ -6,8 +6,9 @@ Endpoints:
   POST /api/bot/messages   {conversationId, text}   → 409 ai_paused|window_closed
   PUT  /api/bot/ficha      {conversationId, ficha}
   POST /api/bot/handoff    {conversationId, reason}
-  GET  /api/bot/availability?limit=6
+  GET  /api/bot/availability?limit=&perDay=&days=   → huecos repartidos por día
   POST /api/bot/bookings   {conversationId, startUtc} → 409 slot_taken + slots frescos
+  PATCH /api/bot/bookings  {conversationId, startUtc} → mueve la próxima cita
   GET  /api/bot/media/{mediaId}                       → binario + content-type
   POST /api/bot/reset      {conversationId}           → reinicio de pruebas (002)
 """
@@ -42,11 +43,36 @@ class SlotTaken(CrmConflict):
         self.slots: list[dict[str, Any]] = list((payload or {}).get("slots") or [])
 
 
-def _conflict_code(response: httpx.Response) -> str:
+def _payload(response: httpx.Response) -> dict[str, Any]:
     try:
-        return str(response.json().get("code") or "conflict")
+        data = response.json()
     except Exception:
-        return "conflict"
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _conflict_code(response: httpx.Response) -> str:
+    """Código tipado de un 409.
+
+    El CRM anida `{"error": {"code": ...}}`; la forma plana `{"code": ...}`
+    solo vivía en los mocks, así que en producción TODO 409 se leía como
+    "conflict" genérico y el camino de `slot_taken` (re-ofrecer alternativas
+    frescas) nunca se activaba. Se toleran las dos formas.
+    """
+    payload = _payload(response)
+    nested = payload.get("error")
+    if isinstance(nested, dict) and nested.get("code"):
+        return str(nested["code"])
+    return str(payload.get("code") or "conflict")
+
+
+def _booking_conflict(response: httpx.Response) -> CrmConflict:
+    """409 de agenda: `slot_taken` viene con alternativas frescas adjuntas."""
+    payload = _payload(response)
+    code = _conflict_code(response)
+    if code == "slot_taken":
+        return SlotTaken(payload)
+    return CrmConflict(code, payload)
 
 
 # Catálogo cerrado del CRM para handoff.reason (006). El LLM escribe motivos
@@ -150,10 +176,21 @@ class CrmClient:
         if resp.status_code != 200:
             raise CrmError(f"handoff devolvió {resp.status_code}")
 
-    async def get_availability(self, limit: int = 6) -> list[dict[str, Any]]:
-        resp = await self._request(
-            "GET", "/api/bot/availability", params={"limit": limit}
-        )
+    async def get_availability(
+        self,
+        limit: int = 6,
+        per_day: int | None = None,
+        days: int | None = None,
+    ) -> list[dict[str, Any]]:
+        """Huecos libres. Con `per_day` el CRM los reparte entre días distintos
+        (si no, los primeros N se los come el día de hoy) y los devuelve con el
+        día desambiguado en `dayLabel`."""
+        params: dict[str, Any] = {"limit": limit}
+        if per_day:
+            params["perDay"] = per_day
+        if days:
+            params["days"] = days
+        resp = await self._request("GET", "/api/bot/availability", params=params)
         if resp.status_code != 200:
             raise CrmError(f"availability devolvió {resp.status_code}")
         slots = resp.json().get("slots") or []
@@ -168,17 +205,32 @@ class CrmClient:
             json={"conversationId": conversation_id, "startUtc": start_utc},
         )
         if resp.status_code == 409:
-            payload: dict[str, Any] = {}
-            try:
-                payload = resp.json()
-            except Exception:
-                pass
-            if payload.get("code") == "slot_taken":
-                raise SlotTaken(payload)
-            raise CrmConflict(_conflict_code(resp), payload)
+            raise _booking_conflict(resp)
         # El CRM real responde 201 Created (REST); los mocks viejos daban 200.
         if resp.status_code not in (200, 201):
             raise CrmError(f"bookings devolvió {resp.status_code}")
+        data: dict[str, Any] = resp.json()
+        return data
+
+    async def reschedule_booking(
+        self, conversation_id: str, start_utc: str
+    ) -> dict[str, Any]:
+        """Mueve la PRÓXIMA cita activa del lead a otro horario ofrecido.
+
+        Antes esto no existía y el agente tenía que hacer handoff: la IA se
+        pausaba y el lead quedaba sin nadie del otro lado.
+        """
+        resp = await self._request(
+            "PATCH",
+            "/api/bot/bookings",
+            json={"conversationId": conversation_id, "startUtc": start_utc},
+        )
+        if resp.status_code == 409:
+            raise _booking_conflict(resp)
+        if resp.status_code == 404:
+            raise CrmConflict("no_booking", _payload(resp))
+        if resp.status_code != 200:
+            raise CrmError(f"reschedule devolvió {resp.status_code}")
         data: dict[str, Any] = resp.json()
         return data
 

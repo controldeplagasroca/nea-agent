@@ -11,13 +11,20 @@ import logging
 from datetime import datetime, timezone
 from typing import Any
 
-from app.crm import CrmError, SlotTaken
+from app.crm import CrmConflict, CrmError, SlotTaken
 from app.profile import BusinessProfile
 from app.state import AppContext, Conversation, OfferedSlot
 
 logger = logging.getLogger("nea.tools")
 
-MAX_OFFERED = 3
+# Cuántos huecos quedan RESERVABLES tras un propose_slots. El agente muestra 3
+# a la vez (regla del prompt), pero guardar solo 3 lo dejaba sin nada que
+# ofrecer cuando el lead pedía otro día: el catálogo reservable es más ancho
+# que el menú que se enseña.
+MAX_OFFERED = 12
+# Reparto pedido al CRM: hasta 3 huecos por día, en 5 días distintos.
+OFFER_PER_DAY = 3
+OFFER_DAYS = 5
 
 TOOL_SCHEMAS: list[dict[str, Any]] = [
     {
@@ -55,9 +62,12 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
         "function": {
             "name": "propose_slots",
             "description": (
-                "Consulta la disponibilidad real de la agenda del negocio y te "
-                "regresa hasta 3 horarios para ofrecer al lead (con etiqueta en "
-                "español). SOLO estos horarios serán reservables después."
+                "Consulta la disponibilidad real de la agenda del negocio. Te "
+                "regresa los huecos libres REPARTIDOS entre los próximos días, "
+                "cada uno con su día en palabras (hoy/mañana/nombre del día). "
+                "Ofrece al lead máximo 3, los que embonen con lo que pidió. Si "
+                "el día que pidió no aparece, es que no hay agenda ese día: "
+                "dilo. SOLO estos horarios serán reservables después."
             ),
             "parameters": {"type": "object", "properties": {}},
         },
@@ -69,7 +79,8 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
             "description": (
                 "Reserva la cita en uno de los horarios previamente ofrecidos. "
                 "start_utc debe ser EXACTAMENTE el start_utc de un slot ofrecido "
-                "en esta conversación."
+                "en esta conversación. Llámala SOLO después de haber nombrado el "
+                "día completo y de que el lead lo aceptara sin ambigüedad."
             ),
             "parameters": {
                 "type": "object",
@@ -77,9 +88,42 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
                     "start_utc": {
                         "type": "string",
                         "description": "ISO 8601 UTC del slot elegido, tal cual se ofreció",
-                    }
+                    },
+                    "dia_confirmado": {
+                        "type": "string",
+                        "description": (
+                            "Lo que el lead escribió para aceptar ESE día concreto. "
+                            "Si no puedes citarlo, todavía no confirmó: pregunta "
+                            "en vez de reservar."
+                        ),
+                    },
                 },
-                "required": ["start_utc"],
+                "required": ["start_utc", "dia_confirmado"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "reschedule_session",
+            "description": (
+                "Mueve la cita YA agendada del lead a otro horario ofrecido. "
+                "Mismo protocolo que book_session: primero propose_slots, luego "
+                "confirmas el día completo, y hasta entonces mueves."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "start_utc": {
+                        "type": "string",
+                        "description": "ISO 8601 UTC del nuevo slot, tal cual se ofreció",
+                    },
+                    "dia_confirmado": {
+                        "type": "string",
+                        "description": "Lo que el lead escribió para aceptar ESE día",
+                    },
+                },
+                "required": ["start_utc", "dia_confirmado"],
             },
         },
     },
@@ -132,6 +176,21 @@ def _parse_utc(value: str) -> datetime | None:
     return dt
 
 
+def _label_of(raw: dict[str, Any], start: datetime) -> str:
+    """Etiqueta con el día en palabras: "hoy viernes 7 de agosto, 10:30".
+
+    La corta del CRM ("vie 7 ago, 10:30") se presta a que el lead entienda
+    otro día: basta que conteste "10:30, de mañana" a una oferta de HOY para
+    agendar mal. Si el CRM no manda `dayLabel` (respuestas sin reparto, p. ej.
+    las alternativas de un slot_taken), se cae a la corta.
+    """
+    day_label = str(raw.get("dayLabel") or "").strip()
+    time = str(raw.get("time") or "").strip()
+    if day_label and time:
+        return f"{day_label}, {time}"
+    return str(raw.get("label") or _iso_z(start))
+
+
 def _slots_from_payload(
     conversation_id: int, raw_slots: list[dict[str, Any]]
 ) -> list[OfferedSlot]:
@@ -147,7 +206,7 @@ def _slots_from_payload(
                 conversation_id=conversation_id,
                 start_utc=start,
                 end_utc=end,
-                label=str(raw.get("label") or _iso_z(start)),
+                label=_label_of(raw, start),
             )
         )
     return out
@@ -185,6 +244,8 @@ class ToolRuntime:
                 return await self._propose_slots()
             if name == "book_session":
                 return await self._book_session(args)
+            if name == "reschedule_session":
+                return await self._reschedule_session(args)
             if name == "route_out":
                 return await self._route_out()
             if name == "handoff":
@@ -208,7 +269,9 @@ class ToolRuntime:
         return {"ok": True}
 
     async def _propose_slots(self) -> dict[str, Any]:
-        raw = await self._ctx.crm.get_availability(limit=6)
+        raw = await self._ctx.crm.get_availability(
+            limit=MAX_OFFERED, per_day=OFFER_PER_DAY, days=OFFER_DAYS
+        )
         slots = _slots_from_payload(self._conv.id, raw)
         if not slots:
             return {
@@ -221,34 +284,66 @@ class ToolRuntime:
         return {
             "ok": True,
             "slots": _slots_for_llm(slots),
-            "instrucciones": "ofrece estos horarios con su etiqueta tal cual; máximo 3",
+            "dias_con_agenda": sorted(
+                {s.label.rsplit(",", 1)[0].strip() for s in slots}
+            ),
+            "instrucciones": (
+                "esta es TODA la agenda abierta: los días que no aparecen aquí "
+                "NO tienen agenda, dilo en vez de mover al lead a otro día. "
+                "Ofrécele máximo 3, con su etiqueta tal cual (día incluido), "
+                "los que embonen con lo que pidió."
+            ),
         }
 
-    async def _book_session(self, args: dict[str, Any]) -> dict[str, Any]:
+    async def _resolve_offered(
+        self, args: dict[str, Any], accion: str
+    ) -> tuple[OfferedSlot | None, dict[str, Any] | None]:
+        """Slot elegido, o el error listo para devolverle al LLM.
+
+        Validación server-side por epoch exacto: solo lo ofrecido es reservable.
+        """
         wanted = _parse_utc(str(args.get("start_utc") or ""))
         offered = await self._ctx.store.get_offered_slots(self._conv.id)
         if wanted is None:
-            return {
+            return None, {
                 "ok": False,
                 "error": "start_utc_invalido",
                 "slots_ofrecidos": _slots_for_llm(offered),
             }
-        # Validación server-side por epoch exacto: solo lo ofrecido es reservable.
         chosen = next(
-            (s for s in offered if int(s.start_utc.timestamp()) == int(wanted.timestamp())),
+            (
+                s
+                for s in offered
+                if int(s.start_utc.timestamp()) == int(wanted.timestamp())
+            ),
             None,
         )
         if chosen is None:
             logger.info(
-                "tools: book_session rechazado — %s no está entre los ofrecidos",
+                "tools: %s rechazado — %s no está entre los ofrecidos",
+                accion,
                 args.get("start_utc"),
             )
-            return {
+            return None, {
                 "ok": False,
                 "error": "slot_no_ofrecido",
-                "detalle": "solo puedes reservar un horario que ya ofreciste",
+                "detalle": "solo puedes agendar un horario que ya ofreciste",
                 "slots_ofrecidos": _slots_for_llm(offered),
             }
+        # Deja rastro de sobre qué frase del lead se tomó la decisión: cuando
+        # una cita sale mal, esto dice si hubo confirmación o se asumió.
+        logger.info(
+            "tools: %s a %s (el lead confirmó con: %r)",
+            accion,
+            chosen.label,
+            str(args.get("dia_confirmado") or "")[:120],
+        )
+        return chosen, None
+
+    async def _book_session(self, args: dict[str, Any]) -> dict[str, Any]:
+        chosen, error = await self._resolve_offered(args, "book_session")
+        if error is not None or chosen is None:
+            return error or {"ok": False, "error": "slot_no_ofrecido"}
         try:
             result = await self._ctx.crm.create_booking(
                 self._crm_conv_id, _iso_z(chosen.start_utc)
@@ -273,12 +368,52 @@ class ToolRuntime:
             logger.warning("tools: no pude actualizar ficha tras booking: %s", exc)
         return {
             "ok": True,
-            "label": result.get("label") or chosen.label,
+            # La etiqueta del slot ofrecido trae el día en palabras; la del
+            # CRM es la corta. Se repite ESTA para que el lead lea el día.
+            "label": chosen.label or result.get("label"),
             "zoom_url": result.get("zoomJoinUrl"),
             "instrucciones": (
-                "confirma día y hora de la cita, comparte el link de la "
-                "videollamada si existe y menciona lo que el negocio pida "
-                "para llegar preparado"
+                "confirma el día COMPLETO y la hora tal cual dice label, "
+                "comparte el link de la videollamada si existe y menciona lo "
+                "que el negocio pida para llegar preparado"
+            ),
+        }
+
+    async def _reschedule_session(self, args: dict[str, Any]) -> dict[str, Any]:
+        chosen, error = await self._resolve_offered(args, "reschedule_session")
+        if error is not None or chosen is None:
+            return error or {"ok": False, "error": "slot_no_ofrecido"}
+        try:
+            result = await self._ctx.crm.reschedule_booking(
+                self._crm_conv_id, _iso_z(chosen.start_utc)
+            )
+        except SlotTaken as exc:
+            fresh = _slots_from_payload(self._conv.id, exc.slots)
+            await self._ctx.store.replace_offered_slots(self._conv.id, fresh)
+            return {
+                "ok": False,
+                "error": "slot_taken",
+                "detalle": "ese horario se acaba de ocupar; discúlpate breve y ofrece estas alternativas",
+                "slots": _slots_for_llm(fresh),
+            }
+        except CrmConflict as exc:
+            if exc.code == "no_booking":
+                return {
+                    "ok": False,
+                    "error": "sin_cita",
+                    "detalle": "el lead no tiene cita por delante; usa book_session",
+                }
+            raise
+        await self._ctx.store.clear_offered_slots(self._conv.id)
+        self.booked = True
+        return {
+            "ok": True,
+            "label": chosen.label or result.get("label"),
+            "zoom_url": result.get("zoomJoinUrl"),
+            "instrucciones": (
+                "confirma que quedó movida, con el día COMPLETO y la hora tal "
+                "cual dice label; el link de la videollamada sigue siendo el "
+                "mismo salvo que aquí venga otro"
             ),
         }
 

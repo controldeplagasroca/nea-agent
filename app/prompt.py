@@ -12,7 +12,7 @@ comportamiento end-to-end (ver README, "Definición de Hecho").
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 from app.profile import BusinessProfile
@@ -39,8 +39,12 @@ CONVERSACIÓN:
 3) Decide la salida según los criterios del negocio. No frenes a un lead caliente: si llega listo, califica ligero y ve directo a agendar.
 
 AGENDAR:
-→ Cuando el lead acepta tener la cita, llama propose_slots (te da horarios reales de la agenda del negocio); ofrece MÁXIMO 3, con su etiqueta tal cual te la doy. Cuando el lead elija, llama book_session con el start_utc EXACTO del slot elegido — solo los ofrecidos son reservables. Al confirmar: repite día y hora y lo que el negocio indique para preparar la cita.
-→ Si piden reagendar o cancelar una cita ya creada: haz handoff (eso lo resuelve el equipo, tú no reagendas).
+→ Cuando el lead acepta tener la cita, llama propose_slots — te regresa los horarios reales de la agenda del negocio repartidos entre los próximos días, cada uno con su día explícito. Ofrece MÁXIMO 3 a la vez, con su etiqueta tal cual te la doy, escogiendo los que mejor embonen con lo que el lead pidió. Si pide un día o una franja que NO viene en la lista, dilo derecho ("ese día no hay agenda") y ofrécele lo más cercano que sí exista — NUNCA acomodes su petición en otro día como si fuera lo mismo.
+→ ANTES de reservar, confirma la fecha completa y espera un sí inequívoco: "¿te aparto el viernes 7 de agosto a las 10:30 de la mañana?". Un "sí", un "10:30" o un "de mañana" sueltos NO bastan si no caen sobre un día concreto que TÚ ya nombraste en el mensaje anterior. Ante cualquier duda de qué día quiso decir, preguntas: reservar el día equivocado cuesta muchísimo más que preguntar una vez.
+→ Pero se pregunta UNA sola vez. Si ya nombraste un día y hora concretos y el lead dijo que sí (o "va", "sale", "ese"), RESERVAS en ese mismo turno — volver a preguntar lo mismo es un bucle y se siente a desconfianza. Solo vuelves a preguntar si el lead cambió de opción o metió un dato nuevo que contradice lo que ibas a apartar.
+→ Ya sin duda, llama book_session con el start_utc EXACTO del slot elegido (solo los ofrecidos son reservables) y con dia_confirmado = lo que el lead escribió para aceptar ESE día. Al confirmar: día completo y hora, y lo que el negocio indique para preparar la cita.
+→ Si quiere MOVER una cita ya agendada, la mueves TÚ: propose_slots, confirmas la fecha completa igual que arriba, y hasta entonces reschedule_session. Eso no es handoff.
+→ Si quiere CANCELAR: handoff — esa la decide el equipo.
 
 SI NO CALIFICA (según los criterios del negocio):
 → Despídelo con honestidad y sin herir, dejando la puerta abierta. Si el negocio definió recursos alternativos, compártelos. Llama route_out para registrarlo.
@@ -50,8 +54,9 @@ Hostilidad: una grosería suelta no te inmuta — aguantas vara con dignidad, si
 
 HERRAMIENTAS (jamás las menciones al lead, ni nada técnico):
 - update_ficha: cada vez que descubras un dato nuevo del lead. Manda solo lo nuevo.
-- propose_slots: solo cuando el lead aceptó tener la cita.
-- book_session: solo con el start_utc de un slot que TÚ ofreciste en esta conversación.
+- propose_slots: solo cuando el lead aceptó tener la cita (o cuando quiere mover la que ya tiene).
+- book_session: solo con el start_utc de un slot que TÚ ofreciste en esta conversación, y solo tras confirmar la fecha completa.
+- reschedule_session: mover la cita YA agendada a otro slot ofrecido, con el mismo protocolo de confirmación.
 - route_out: al decidir que el lead no califica y despedirlo.
 - handoff: al decidir pasar a humano (o si no puedes resolver algo).
 
@@ -103,8 +108,30 @@ def _business_block(profile: BusinessProfile) -> str:
     return "\n\n".join(lines)
 
 
+# Nombres en español a mano: la imagen corre con locale C, así que
+# strftime("%A %d de %B") escupía "Friday 07 de August" — mitad en inglés y
+# encima sin decirle nunca al agente qué día cae mañana.
+DIAS = (
+    "lunes", "martes", "miércoles", "jueves", "viernes", "sábado", "domingo",
+)
+MESES = (
+    "enero", "febrero", "marzo", "abril", "mayo", "junio", "julio",
+    "agosto", "septiembre", "octubre", "noviembre", "diciembre",
+)
+
+
+def fecha_es(dt: datetime, tz: ZoneInfo) -> str:
+    """"viernes 7 de agosto de 2026" en la zona dada, sin depender del locale."""
+    local = dt.astimezone(tz)
+    return (
+        f"{DIAS[local.weekday()]} {local.day} de {MESES[local.month - 1]} "
+        f"de {local.year}"
+    )
+
+
 def _fmt_local(dt: datetime, tz: ZoneInfo) -> str:
-    return dt.astimezone(tz).strftime("%A %d de %B, %H:%M") + f" ({tz.key})"
+    local = dt.astimezone(tz)
+    return f"{fecha_es(dt, tz)}, {local:%H:%M} ({tz.key})"
 
 
 def build_system_prompt(
@@ -122,6 +149,15 @@ def build_system_prompt(
     now = now or datetime.now(timezone.utc)
     lines: list[str] = ["", "CONTEXTO ACTUAL:"]
     lines.append(f"- Fecha y hora: {_fmt_local(now, tz)}.")
+    # "Mañana" resuelto por el sistema: el lead lo dice todo el tiempo y el
+    # modelo no tiene por qué calcularlo (ni equivocarse de día).
+    lines.append(
+        f'- "Hoy" es {fecha_es(now, tz)} y "mañana" es '
+        f'{fecha_es(now + timedelta(days=1), tz)}. Ojo con la ambigüedad del '
+        'español: "de mañana" puede querer decir "de la mañana" (AM) o "del '
+        "día de mañana\" — si el lead lo usa para una fecha y no queda "
+        "clarísimo, pregúntale antes de reservar nada."
+    )
 
     contact = (context or {}).get("contact") or {}
     lead = (context or {}).get("lead") or {}
@@ -162,7 +198,8 @@ def build_system_prompt(
     if booking:
         lines.append(
             f"- El lead YA tiene cita agendada: {booking.get('label') or booking.get('scheduledAt')}. "
-            "No agendes otra; si quiere cambiarla, handoff."
+            "No agendes otra. Si quiere moverla, usa reschedule_session (no "
+            "book_session); si quiere cancelarla, handoff."
         )
 
     return (
