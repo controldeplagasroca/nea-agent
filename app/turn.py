@@ -9,8 +9,9 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+from contextlib import asynccontextmanager
 from datetime import timedelta
-from typing import Any
+from typing import Any, AsyncIterator
 from zoneinfo import ZoneInfo
 
 from app import media
@@ -42,10 +43,47 @@ def _agent_tz(settings: Any) -> ZoneInfo:
         return ZoneInfo("America/Mexico_City")
 
 
+@asynccontextmanager
+async def conversation_lock(ctx: AppContext, identity: str) -> AsyncIterator[None]:
+    """Serializa los turnos de UNA conversación.
+
+    El coalescer agrupa ráfagas por debounce, pero nada le impide disparar un
+    turno nuevo mientras el anterior sigue corriendo: el mensaje que llega
+    tarde abre su propio turno con el contexto de ANTES de que el turno vivo
+    actuara. Así se reserva una cita sin haber leído el mensaje que la
+    corregía, y salen dos respuestas pisándose.
+
+    Con el candado, el turno tardío espera, y al arrancar re-lee el contexto
+    del CRM y el historial — que ya incluyen lo que hizo el turno anterior.
+    """
+    lock = ctx.turn_locks.get(identity)
+    if lock is None:
+        lock = ctx.turn_locks[identity] = asyncio.Lock()
+    # El conteo sube ANTES del await: quien ya tiene el objeto en mano queda
+    # contado, así que el candado nunca se recicla debajo de un turno que
+    # espera (y el diccionario no crece sin fin con cada lead histórico).
+    ctx.turn_lock_users[identity] = ctx.turn_lock_users.get(identity, 0) + 1
+    if lock.locked():
+        logger.info(
+            "turno de %s en vuelo — el mensaje nuevo espera su turno", identity
+        )
+    try:
+        async with lock:
+            yield
+    finally:
+        remaining = ctx.turn_lock_users.get(identity, 1) - 1
+        if remaining <= 0:
+            ctx.turn_lock_users.pop(identity, None)
+            ctx.turn_locks.pop(identity, None)
+        else:
+            ctx.turn_lock_users[identity] = remaining
+
+
 async def handle_flush(ctx: AppContext, identity: str, items: list[Any]) -> None:
     """Callback del coalescer — nunca propaga excepciones."""
     try:
-        await run_turn(ctx, identity, items)
+        async with conversation_lock(ctx, identity):
+            await run_turn(ctx, identity, items)
     except Exception:
         logger.exception("turno de %s reventó — silencio", identity)
 

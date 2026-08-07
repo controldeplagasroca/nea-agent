@@ -1,6 +1,7 @@
 """Seguimiento: UN empujón y solo uno, marcado ANTES de enviar."""
 from __future__ import annotations
 
+import asyncio
 from datetime import timedelta
 
 import httpx
@@ -8,6 +9,7 @@ import httpx
 from app.followup import FollowupWorker
 from app.llm import LlmReply
 from app.state import utcnow
+from app.turn import conversation_lock
 from tests.conftest import (
     CRM_CONV_ID,
     CRM_URL,
@@ -105,4 +107,31 @@ async def test_followup_llm_caido_se_omite_sin_reintento_futuro(respx_mock):
     await worker.tick()
     assert messages.call_count == 0
     assert ctx.store.conversations[conv.id].followup_sent is True  # consumido
+    await ctx.crm.aclose()
+
+
+async def test_followup_espera_el_turno_vivo_y_se_calla_si_el_lead_escribio(respx_mock):
+    """El empujón se reclama antes de enviarlo. Si mientras espera su turno el
+    lead escribe, el "¿seguimos?" queda fuera de lugar — y encimado con la
+    respuesta del turno vivo."""
+    ctx = make_ctx()
+    ctx.llm.replies = [LlmReply(content="¿Seguimos donde nos quedamos? 😊")]
+    conv = await preparar_conversacion(ctx)
+    respx_mock.get(f"{CRM_URL}/api/bot/context").mock(
+        return_value=httpx.Response(200, json=crm_context())
+    )
+    messages = respx_mock.post(f"{CRM_URL}/api/bot/messages").mock(
+        return_value=httpx.Response(200, json={"messageId": "m1"})
+    )
+
+    # Un turno del lead ya está en vuelo: tiene el candado tomado.
+    async with conversation_lock(ctx, IDENTITY):
+        tarea = asyncio.create_task(FollowupWorker(ctx).tick())
+        await asyncio.sleep(0.05)
+        assert messages.call_count == 0, "el empujón no esperó al turno vivo"
+        # Ese turno registra el mensaje del lead y luego suelta el candado.
+        await ctx.store.update_conversation(conv.id, last_inbound_at=utcnow())
+    await tarea
+
+    assert messages.call_count == 0  # ya hubo conversación: sin empujón
     await ctx.crm.aclose()

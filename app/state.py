@@ -352,3 +352,10 @@ class AppContext:
     profile: Any | None = None  # ProfileProvider; None en tests = perfil mínimo
     coalescer: Any | None = None
     relay_wake: asyncio.Event = field(default_factory=asyncio.Event)
+    # Un candado por identidad: los turnos de UNA conversación se serializan.
+    # Sin esto, una ráfaga que llega mientras el turno anterior sigue en vuelo
+    # abre un segundo turno con contexto viejo (se reservó una cita antes de
+    # leer el mensaje que la corregía, y salieron dos respuestas encimadas).
+    turn_locks: dict[str, asyncio.Lock] = field(default_factory=dict)
+    # Cuántos turnos tienen tomado (o esperan) el candado de esa identidad.
+    turn_lock_users: dict[str, int] = field(default_factory=dict)
