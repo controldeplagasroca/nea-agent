@@ -382,7 +382,7 @@ async def test_reaccion_no_abre_turno(ctx, client, respx_mock):
 
 
 async def test_reset_de_linea_de_pruebas_borra_memoria(respx_mock):
-    settings = make_settings(allowed_wa_ids=IDENTITY)
+    settings = make_settings(tester_wa_ids=IDENTITY)
     ctx = make_ctx(settings)
     routes = mock_crm_basics(respx_mock)
     reset_route = respx_mock.post(f"{CRM_URL}/api/bot/reset").mock(
@@ -410,14 +410,14 @@ async def test_reset_de_linea_de_pruebas_borra_memoria(respx_mock):
     assert routes["messages"].call_count == 1  # confirmación al tester
 
 
-async def test_reset_sin_allowlist_es_texto_normal(ctx, client, respx_mock):
+async def test_reset_sin_lista_de_testers_es_texto_normal(ctx, client, respx_mock):
     routes = mock_crm_basics(respx_mock)
     reset_route = respx_mock.post(f"{CRM_URL}/api/bot/reset").mock(
         return_value=httpx.Response(200, json={"ok": True})
     )
     await client.post("/webhook", content=wa_body(text="/reset", wamid="wamid.rst2"))
     await asyncio.sleep(0.3)
-    assert reset_route.call_count == 0  # con la allowlist vacía no hay comando
+    assert reset_route.call_count == 0  # sin TESTER_WA_IDS no hay comando
     assert len(ctx.llm.calls) == 1  # se trató como un mensaje cualquiera
     assert routes["messages"].call_count == 1
 
@@ -434,3 +434,22 @@ async def test_media_caida_degrada_honesto(ctx, client, respx_mock):
         if m["role"] == "user"
     )
     assert "NO pudiste abrir" in user_texts  # marcador honesto
+
+
+async def test_reset_no_depende_de_la_allowlist_de_respuesta(respx_mock):
+    """En produccion ALLOWED_WA_IDS va vacia (el agente atiende a todos).
+    Cuando el /reset colgaba de ella, el comando quedaba muerto justo donde
+    hace falta: para usarlo habia que dejar de atender a los leads reales."""
+    ctx = make_ctx(make_settings(allowed_wa_ids="", tester_wa_ids=IDENTITY))
+    mock_crm_basics(respx_mock)
+    reset_route = respx_mock.post(f"{CRM_URL}/api/bot/reset").mock(
+        return_value=httpx.Response(200, json={"ok": True})
+    )
+    app = create_app(ctx=ctx)
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://bot.test") as c:
+        await c.post("/webhook", content=wa_body(text="/reset", wamid="wamid.rst3"))
+        await asyncio.sleep(0.3)
+    await ctx.crm.aclose()
+    assert reset_route.call_count == 1
+    assert len(ctx.llm.calls) == 0

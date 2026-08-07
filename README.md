@@ -88,9 +88,12 @@ y el dominio del webhook hacia el puerto 8000.
 - **Allowlist de pruebas**: con `ALLOWED_WA_IDS` poblada, Nea solo responde a
   esas identidades (todo lo demás se releva al CRM sin respuesta). Vacíala
   únicamente para salir a producción.
-- **Comando `/reset`**: desde una línea de la allowlist, reinicia la memoria
-  de esa conversación (ficha limpia, IA reactivada) — cada prueba arranca con
-  un lead virgen.
+- **Comando `/reset`**: desde una línea listada en `TESTER_WA_IDS`, reinicia
+  la memoria de esa conversación (ficha limpia, IA reactivada) — cada prueba
+  arranca con un lead virgen. Es una variable aparte de `ALLOWED_WA_IDS` a
+  propósito: en producción la allowlist va vacía para atender a todos los
+  leads, y si el comando colgara de ella no habría forma de resetear sin
+  dejar de atenderlos.
 - `selftest/evolution.py` es un harness opcional para mandar WhatsApp reales
   desde una línea tester vía [Evolution API](https://doc.evolution-api.com/),
   con pausas mínimas, tope de mensajes y kill-switch de archivo.
