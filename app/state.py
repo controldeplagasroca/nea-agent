@@ -34,6 +34,9 @@ class Conversation:
     followup_due_at: datetime | None = None
     followup_sent: bool = False
     last_inbound_at: datetime | None = None
+    # Puesta cuando el agente cierra por conversación sin rumbo: mientras
+    # viva, el turno guarda silencio (ver app/stall.py).
+    stalled_at: datetime | None = None
 
 
 @dataclass
@@ -248,6 +251,7 @@ class MemoryStore:
         conv.media_notice_sent = False
         conv.followup_due_at = None
         conv.followup_sent = False
+        conv.stalled_at = None
 
     async def add_message(
         self,

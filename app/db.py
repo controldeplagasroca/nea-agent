@@ -24,6 +24,7 @@ _CONV_COLUMNS = frozenset(
         "followup_due_at",
         "followup_sent",
         "last_inbound_at",
+        "stalled_at",
     }
 )
 
@@ -39,6 +40,7 @@ def _conv_from_row(row: asyncpg.Record) -> Conversation:
         followup_due_at=row["followup_due_at"],
         followup_sent=row["followup_sent"],
         last_inbound_at=row["last_inbound_at"],
+        stalled_at=row["stalled_at"],
     )
 
 
@@ -177,7 +179,8 @@ class PgStore:
                     UPDATE bot_conversation
                     SET phase = 'descubrimiento', greeted = FALSE,
                         media_notice_sent = FALSE, followup_due_at = NULL,
-                        followup_sent = FALSE, updated_at = now()
+                        followup_sent = FALSE, stalled_at = NULL,
+                        updated_at = now()
                     WHERE id = $1
                     """,
                     conversation_id,

@@ -251,6 +251,10 @@ async def _early_typing(ctx: AppContext, identity: str) -> None:
         conv = await ctx.store.get_or_create_conversation(identity)
         if not conv.crm_conversation_id:
             return
+        # Conversación ya cerrada por falta de rumbo: no va a haber respuesta,
+        # así que un "escribiendo…" sería justo la mentira que este gate evita.
+        if conv.stalled_at is not None:
+            return
         await ctx.crm.post_typing(str(conv.crm_conversation_id))
     except Exception as exc:
         logger.debug("typing temprano de %s falló (%s) — sigo", identity, exc)

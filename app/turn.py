@@ -19,6 +19,7 @@ from app.config import canonical_identity
 from app.crm import CrmConflict, CrmError
 from app.hostility import ALERT as HOSTILITY_ALERT, hostile_streak
 from app.llm import LlmExhausted
+from app.stall import ALERTA as STALL_ALERT, racha_vacia, sin_rumbo
 from app.profile import resolve_profile
 from app.prompt import build_system_prompt
 from app.state import AppContext, InboundMessage, utcnow
@@ -27,6 +28,11 @@ from app.tools import TOOL_SCHEMAS, ToolRuntime
 logger = logging.getLogger("nea.turn")
 
 MAX_TOOL_ROUNDS = 5
+# Cuánto calla el agente tras cerrar por falta de rumbo. Un lead que vuelve al
+# día siguiente merece respuesta; el que insiste en el mismo hilo muerto, no.
+STALL_COOLDOWN = timedelta(hours=24)
+# Mensajes que se traen para contar el hilo del lead (el LLM ve menos).
+STALL_LOOKBACK = 40
 CONTEXT_ATTEMPTS = 3  # el relay puede tardar un instante en aterrizar en el CRM
 
 # Comando de pruebas: reinicia la memoria de ESA conversación. Disponible SOLO
@@ -112,6 +118,23 @@ async def run_turn(
         await _run_reset(ctx, conv, identity)
         return
 
+    # --- Gate 1.5: conversación ya cerrada por no ir a ningún lado --------
+    # El agente ya se despidió amable; seguir contestando es perseguir. Se
+    # reabre sola tras el enfriamiento (un lead que vuelve al día siguiente
+    # merece respuesta) o cuando el dueño reactiva la IA desde el CRM.
+    if conv.stalled_at is not None:
+        if utcnow() - conv.stalled_at < STALL_COOLDOWN:
+            logger.info(
+                "turno %s: conversación cerrada por falta de rumbo — silencio",
+                identity,
+            )
+            return
+        logger.info(
+            "turno %s: el lead volvió tras el enfriamiento — reabro", identity
+        )
+        await ctx.store.update_conversation(conv.id, stalled_at=None)
+        conv.stalled_at = None
+
     # --- Gate 2: contexto del CRM (aiEnabled, ventana) --------------------
     context = await _fetch_context(ctx, identity)
     if context is None:
@@ -178,7 +201,10 @@ async def run_turn(
         offered=offered,
         tz=_agent_tz(settings),
     )
-    history = await ctx.store.recent_messages(conv.id, settings.history_window)
+    # Se traen más mensajes de los que ve el LLM: el candado de cierre cuenta
+    # el hilo COMPLETO del lead, no solo la ventana de contexto.
+    recientes = await ctx.store.recent_messages(conv.id, STALL_LOOKBACK)
+    history = recientes[-settings.history_window :]
     messages: list[dict[str, Any]] = [{"role": "system", "content": system}] + [
         {"role": m.role, "content": m.content} for m in history
     ]
@@ -188,6 +214,19 @@ async def run_turn(
     streak = hostile_streak([m.content for m in history if m.role == "user"])
     if streak >= 3:
         messages.append({"role": "system", "content": HOSTILITY_ALERT})
+    # Candado de cierre: conversación que no va a ningún lado. Se despide con
+    # UNA línea cálida en este turno y después calla (gate 1.5). El conteo es
+    # determinista aquí; el LLM solo pone la redacción.
+    del_lead = [m.content for m in recientes if m.role == "user"]
+    cerrar_sin_rumbo = streak < 3 and sin_rumbo(del_lead, conv.phase)
+    if cerrar_sin_rumbo:
+        logger.info(
+            "turno %s: sin rumbo (%d mensajes del lead, racha vacía %d) — cierro",
+            identity,
+            len(del_lead),
+            racha_vacia(del_lead),
+        )
+        messages.append({"role": "system", "content": STALL_ALERT})
     if image_uris:
         # El último user message de este turno se vuelve multimodal: el
         # historial persiste solo el texto; las imágenes viven en ESTE turno.
@@ -231,7 +270,13 @@ async def run_turn(
 
     # --- Fase + seguimiento -----------------------------------------------
     updates: dict[str, Any] = {"greeted": True}
-    if runtime.handoff_reason is not None or runtime.booked or runtime.routed_out:
+    if cerrar_sin_rumbo:
+        # Se marca aunque el envío haya fallado: la decisión de cerrar ya se
+        # tomó y no queremos que el próximo mensaje reabra el ciclo.
+        updates["stalled_at"] = utcnow()
+        updates["phase"] = "cerrada"
+        updates["followup_due_at"] = None
+    elif runtime.handoff_reason is not None or runtime.booked or runtime.routed_out:
         updates["phase"] = "cerrada"
         updates["followup_due_at"] = None
     else:
