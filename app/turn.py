@@ -36,7 +36,7 @@ STALL_LOOKBACK = 40
 CONTEXT_ATTEMPTS = 3  # el relay puede tardar un instante en aterrizar en el CRM
 
 # Comando de pruebas: reinicia la memoria de ESA conversación. Disponible SOLO
-# para identidades de ALLOWED_WA_IDS — con la allowlist vacía queda apagado.
+# para identidades de TESTER_WA_IDS (vacía = comando apagado).
 RESET_COMMANDS = frozenset({"/reset", "#reset"})
 
 
@@ -112,7 +112,7 @@ async def run_turn(
     # --- Comando /reset (líneas de prueba) --------------------------------
     # Corre ANTES de los gates de aiEnabled/ventana: un reset también debe
     # sacar la conversación de un handoff activo.
-    if canonical_identity(identity) in allowed and any(
+    if canonical_identity(identity) in settings.tester_identities and any(
         (m.text or "").strip().lower() in RESET_COMMANDS for m in inbound
     ):
         await _run_reset(ctx, conv, identity)

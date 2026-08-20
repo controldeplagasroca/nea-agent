@@ -48,7 +48,13 @@ class Settings(BaseSettings):
     history_window: int = 10
 
     # Guardarraíles y tiempos
-    allowed_wa_ids: str = ""  # CSV; vacía = responde a todos (Constitución V)
+    allowed_wa_ids: str = ""
+    # Identidades que pueden usar el comando /reset. Va SEPARADA de
+    # allowed_wa_ids a propósito: en producción esa lista va vacía (el agente
+    # atiende a todos los leads), y cuando el /reset colgaba de ella el
+    # comando quedaba muerto justo donde hace falta — para correr una ronda
+    # de pruebas en vivo había que cerrarle la puerta a los leads reales.
+    tester_wa_ids: str = ""  # CSV; vacía = responde a todos (Constitución V)
     coalesce_seconds: float = 4.0
     followup_hours: float = 4.0
     # "Escribiendo…" casi inmediato al recibir un mensaje (antes del coalesce).
@@ -62,11 +68,18 @@ class Settings(BaseSettings):
     # capturar los formatos reales de Meta (spec 002). Apagar al terminar.
     capture_payloads: bool = False
 
+    @staticmethod
+    def _identities(csv: str) -> frozenset[str]:
+        return frozenset(
+            canonical_identity(part) for part in csv.split(",") if part.strip()
+        )
+
     @property
     def allowed_identities(self) -> frozenset[str]:
         """Allowlist canonicalizada; vacía = sin restricción."""
-        return frozenset(
-            canonical_identity(part)
-            for part in self.allowed_wa_ids.split(",")
-            if part.strip()
-        )
+        return self._identities(self.allowed_wa_ids)
+
+    @property
+    def tester_identities(self) -> frozenset[str]:
+        """Quién puede correr /reset. Vacía = comando apagado."""
+        return self._identities(self.tester_wa_ids)
