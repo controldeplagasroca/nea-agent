@@ -17,6 +17,7 @@ from app.llm import LlmExhausted
 from app.profile import resolve_profile
 from app.prompt import FOLLOWUP_INSTRUCTION, build_system_prompt
 from app.state import AppContext, Conversation, utcnow
+from app.turn import conversation_lock
 from app.turn import _agent_tz
 
 logger = logging.getLogger("nea.followup")
@@ -43,15 +44,33 @@ class FollowupWorker:
             if not await self._ctx.store.claim_followup(conv.id):
                 continue
             try:
-                await self._push(conv)
+                # Mismo candado que los turnos: sin él, el empujón puede salir
+                # encimado con la respuesta de un turno vivo (dos mensajes del
+                # agente a la vez). El valor se copia ANTES del candado porque
+                # el Store puede devolver el mismo objeto vivo (MemoryStore) y
+                # compararlo contra sí mismo no detectaría nada.
+                ultimo_inbound = conv.last_inbound_at
+                async with conversation_lock(self._ctx, conv.wa_identity):
+                    await self._push(conv, ultimo_inbound)
             except Exception:
                 logger.exception(
                     "followup de %s falló — queda consumido (a lo sumo uno)",
                     conv.wa_identity,
                 )
 
-    async def _push(self, conv: Conversation) -> None:
+    async def _push(
+        self, conv: Conversation, ultimo_inbound: datetime | None
+    ) -> None:
         ctx = self._ctx
+        # Si mientras esperábamos el candado el lead escribió, el empujón sobra:
+        # ya hay conversación viva y "¿seguimos?" quedaría fuera de lugar.
+        fresca = await ctx.store.get_or_create_conversation(conv.wa_identity)
+        if fresca.last_inbound_at != ultimo_inbound:
+            logger.info(
+                "followup %s: el lead escribió mientras tanto — omitido",
+                conv.wa_identity,
+            )
+            return
         try:
             context = await ctx.crm.get_context(conv.wa_identity)
         except CrmError as exc:

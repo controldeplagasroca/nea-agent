@@ -5,7 +5,7 @@ import asyncio
 import json
 
 from app.llm import LlmExhausted, LlmReply, ToolCall
-from tests.conftest import mock_crm_basics, wa_body
+from tests.conftest import FakeLLM, mock_crm_basics, wa_body
 
 
 async def test_handoff_despedida_primero_pausa_despues(ctx, client, respx_mock):
@@ -72,3 +72,38 @@ async def test_turno_con_route_out_cierra_sin_seguimiento(ctx, client, respx_moc
     conv = next(iter(ctx.store.conversations.values()))
     assert conv.phase == "cerrada"
     assert conv.followup_due_at is None
+
+
+async def test_los_turnos_de_una_conversacion_no_se_encinan(ctx, client, respx_mock):
+    """Un mensaje que llega tarde NO abre un turno con el contexto de antes.
+
+    Dos mensajes con segundos de diferencia: el segundo abría su propio turno
+    mientras el primero seguía corriendo, así que la cita se reservaba sin
+    haber leído el mensaje que la corregía y salían dos respuestas encimadas.
+    """
+    routes = mock_crm_basics(respx_mock)
+
+    class LlmLento(FakeLLM):
+        async def complete(self, messages, tools=None):
+            await asyncio.sleep(0.3)
+            return await super().complete(messages, tools)
+
+    ctx.llm = LlmLento()
+
+    await client.post("/webhook", content=wa_body(text="Si 10.30", wamid="wamid.a"))
+    await asyncio.sleep(0.15)  # el turno A ya arrancó y sigue en el LLM
+    await client.post("/webhook", content=wa_body(text="De mañana", wamid="wamid.b"))
+    await asyncio.sleep(1.2)
+
+    assert routes["messages"].call_count == 2  # una respuesta por turno...
+    rutas = [
+        str(c.request.url.path)
+        for c in respx_mock.calls
+        if str(c.request.url.path) in ("/api/bot/context", "/api/bot/messages")
+    ]
+    # ...y el turno B lee el contexto DESPUÉS de que A mandó la suya: si no,
+    # decide sobre un estado que ya cambió.
+    assert rutas.count("/api/bot/context") == 2
+    assert rutas.index("/api/bot/messages") < rutas.index(
+        "/api/bot/context", rutas.index("/api/bot/context") + 1
+    )
