@@ -26,6 +26,63 @@ MAX_OFFERED = 12
 OFFER_PER_DAY = 3
 OFFER_DAYS = 5
 
+# Palabras clave documentadas por el negocio para diferenciar especie de
+# cucaracha por tamaño/color/ubicación (ver conocimiento del negocio en el
+# CRM). Determinístico a propósito: no es al LLM a quien le toca decidir esto.
+_ALEMANA_KEYWORDS = (
+    "cocina", "estufa", "refri", "refrigerador", "microondas", "licuadora",
+    "tostadora", "tarja", "alacena", "gabinete", "electrodomestico",
+    "chiquita", "chica", "pequena", "delgadita", "clara",
+)
+_AMERICANA_KEYWORDS = (
+    "drenaje", "coladera", "alcantarilla", "patio", "exterior", "sotano",
+    "estacionamiento", "registro", "tuberia", "grandota", "grande",
+    "voladora", "patineta", "cucarachota", "fea", "rojiza", "oscura",
+)
+
+
+def _sin_acentos(texto: str) -> str:
+    reemplazos = str.maketrans("áéíóúñ", "aeioun")
+    return texto.translate(reemplazos)
+
+
+def _clasificar_cucaracha(tamano_color: str, ubicacion: str) -> dict[str, Any]:
+    texto = _sin_acentos(f"{tamano_color} {ubicacion}".lower())
+    alemana_hits = sum(1 for kw in _ALEMANA_KEYWORDS if kw in texto)
+    americana_hits = sum(1 for kw in _AMERICANA_KEYWORDS if kw in texto)
+    if alemana_hits == 0 and americana_hits == 0:
+        return {
+            "ok": True,
+            "especie": "no_concluyente",
+            "instrucciones": (
+                "No hay suficiente información para identificar la especie. "
+                "Pregunta de nuevo, con más detalle, por el tamaño/color y "
+                "por dónde exactamente la ha visto — no cotices ni agendes "
+                "todavía."
+            ),
+        }
+    if alemana_hits == americana_hits:
+        return {
+            "ok": True,
+            "especie": "ambigua",
+            "instrucciones": (
+                "Los datos no distinguen con claridad entre las dos especies. "
+                "Pregunta UN detalle más (p.ej. si la ha visto también en "
+                "patio/coladeras, o solo dentro de la cocina) y vuelve a "
+                "llamar esta herramienta — no cotices ni agendes todavía."
+            ),
+        }
+    especie = "alemana" if alemana_hits > americana_hits else "americana"
+    return {
+        "ok": True,
+        "especie": especie,
+        "instrucciones": (
+            f"Especie identificada: cucaracha {especie}. Ya puedes explicar "
+            "el tratamiento y, si el lead lo pide, cotizar — usa el "
+            "conocimiento del negocio cargado para esta especie."
+        ),
+    }
+
 TOOL_SCHEMAS: list[dict[str, Any]] = [
     {
         "type": "function",
@@ -142,6 +199,41 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
     {
         "type": "function",
         "function": {
+            "name": "identificar_plaga",
+            "description": (
+                "Identifica la especie de cucaracha (alemana/cocina vs. "
+                "americana/drenaje) a partir de tamaño-color y ubicación que "
+                "describió el lead. Llámala en cuanto tengas AMBOS datos, "
+                "SIEMPRE antes de cotizar o agendar cuando el lead reportó "
+                "cucarachas sin decir cuál especie. Nunca le pidas al lead "
+                "que adivine la especie él mismo — tú la identificas con lo "
+                "que te describa."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "tamano_color": {
+                        "type": "string",
+                        "description": (
+                            "Lo que el lead dijo sobre tamaño y/o color "
+                            "(p.ej. 'chiquita cafecita', 'grande rojiza oscura')"
+                        ),
+                    },
+                    "ubicacion": {
+                        "type": "string",
+                        "description": (
+                            "Dónde el lead ha visto la plaga (p.ej. 'cocina, "
+                            "atrás del refri', 'coladera del patio')"
+                        ),
+                    },
+                },
+                "required": ["tamano_color", "ubicacion"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "handoff",
             "description": (
                 "Pasa la conversación a un humano del negocio y pausa la IA. Tu "
@@ -248,6 +340,8 @@ class ToolRuntime:
                 return await self._reschedule_session(args)
             if name == "route_out":
                 return await self._route_out()
+            if name == "identificar_plaga":
+                return self._identificar_plaga(args)
             if name == "handoff":
                 return self._handoff(args)
             logger.warning("tools: herramienta desconocida %r", name)
@@ -429,6 +523,11 @@ class ToolRuntime:
             out["recursos"] = self._profile.resources
             out["instrucciones"] = "comparte estos recursos al despedirte, puerta abierta"
         return out
+
+    def _identificar_plaga(self, args: dict[str, Any]) -> dict[str, Any]:
+        tamano_color = str(args.get("tamano_color") or "")
+        ubicacion = str(args.get("ubicacion") or "")
+        return _clasificar_cucaracha(tamano_color, ubicacion)
 
     def _handoff(self, args: dict[str, Any]) -> dict[str, Any]:
         self.handoff_reason = str(args.get("reason") or "lead_request")

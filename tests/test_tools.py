@@ -259,3 +259,43 @@ async def test_reschedule_sin_cita_manda_a_book(runtime_y_ctx, respx_mock):
     )
     assert result["ok"] is False
     assert result["error"] == "sin_cita"
+
+
+async def test_identificar_plaga_alemana_por_cocina(runtime_y_ctx):
+    runtime, ctx, conv = runtime_y_ctx
+    result = await runtime.execute(
+        "identificar_plaga",
+        {"tamano_color": "chiquita, cafecita", "ubicacion": "atrás del refri, en la cocina"},
+    )
+    assert result["ok"] is True
+    assert result["especie"] == "alemana"
+
+
+async def test_identificar_plaga_americana_por_drenaje(runtime_y_ctx):
+    runtime, ctx, conv = runtime_y_ctx
+    result = await runtime.execute(
+        "identificar_plaga",
+        {"tamano_color": "grandota, cafe rojiza, hasta vuela", "ubicacion": "en la coladera del patio"},
+    )
+    assert result["ok"] is True
+    assert result["especie"] == "americana"
+
+
+async def test_identificar_plaga_sin_datos_no_concluyente(runtime_y_ctx):
+    runtime, ctx, conv = runtime_y_ctx
+    result = await runtime.execute(
+        "identificar_plaga", {"tamano_color": "no sé", "ubicacion": "no sé"}
+    )
+    assert result["ok"] is True
+    assert result["especie"] == "no_concluyente"
+
+
+async def test_identificar_plaga_ambigua_pide_mas_detalle(runtime_y_ctx):
+    runtime, ctx, conv = runtime_y_ctx
+    # una señal de cada especie: empate a propósito
+    result = await runtime.execute(
+        "identificar_plaga",
+        {"tamano_color": "grande", "ubicacion": "cocina"},
+    )
+    assert result["ok"] is True
+    assert result["especie"] == "ambigua"
