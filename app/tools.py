@@ -27,17 +27,26 @@ OFFER_PER_DAY = 3
 OFFER_DAYS = 5
 
 # Palabras clave documentadas por el negocio para diferenciar especie de
-# cucaracha por tamaño/color/ubicación (ver conocimiento del negocio en el
-# CRM). Determinístico a propósito: no es al LLM a quien le toca decidir esto.
-_ALEMANA_KEYWORDS = (
+# cucaracha (ver conocimiento del negocio en el CRM). Determinístico a
+# propósito: no es al LLM a quien le toca decidir esto.
+#
+# Separadas en dos categorías (tamaño/color vs. ubicación) a propósito: un
+# solo dato suelto (p.ej. "chiquita") NO basta para concluir la especie —
+# se vio en vivo que el modelo declaraba "alemana" con una sola palabra de
+# tamaño y CERO ubicación real. El candado exige una señal de CADA categoría
+# apuntando a la misma especie antes de dar el veredicto por concluyente.
+_ALEMANA_TAMANO_COLOR = ("chiquita", "chica", "pequena", "delgadita", "clara")
+_ALEMANA_UBICACION = (
     "cocina", "estufa", "refri", "refrigerador", "microondas", "licuadora",
     "tostadora", "tarja", "alacena", "gabinete", "electrodomestico",
-    "chiquita", "chica", "pequena", "delgadita", "clara",
 )
-_AMERICANA_KEYWORDS = (
+_AMERICANA_TAMANO_COLOR = (
+    "grandota", "grande", "voladora", "patineta", "cucarachota", "fea",
+    "rojiza", "oscura",
+)
+_AMERICANA_UBICACION = (
     "drenaje", "coladera", "alcantarilla", "patio", "exterior", "sotano",
-    "estacionamiento", "registro", "tuberia", "grandota", "grande",
-    "voladora", "patineta", "cucarachota", "fea", "rojiza", "oscura",
+    "estacionamiento", "registro", "tuberia",
 )
 
 
@@ -47,10 +56,40 @@ def _sin_acentos(texto: str) -> str:
 
 
 def _clasificar_cucaracha(tamano_color: str, ubicacion: str) -> dict[str, Any]:
-    texto = _sin_acentos(f"{tamano_color} {ubicacion}".lower())
-    alemana_hits = sum(1 for kw in _ALEMANA_KEYWORDS if kw in texto)
-    americana_hits = sum(1 for kw in _AMERICANA_KEYWORDS if kw in texto)
-    if alemana_hits == 0 and americana_hits == 0:
+    tc = _sin_acentos(tamano_color.lower())
+    ub = _sin_acentos(ubicacion.lower())
+    alemana_tc = any(kw in tc for kw in _ALEMANA_TAMANO_COLOR)
+    alemana_ub = any(kw in ub for kw in _ALEMANA_UBICACION)
+    americana_tc = any(kw in tc for kw in _AMERICANA_TAMANO_COLOR)
+    americana_ub = any(kw in ub for kw in _AMERICANA_UBICACION)
+    # Concluyente SOLO si tamaño/color Y ubicación apuntan a la MISMA especie
+    # — una señal sola (aunque sea clara) no cierra el candado.
+    alemana_completa = alemana_tc and alemana_ub and not (americana_tc or americana_ub)
+    americana_completa = americana_tc and americana_ub and not (alemana_tc or alemana_ub)
+    if alemana_completa:
+        return {
+            "ok": True,
+            "especie": "alemana",
+            "instrucciones": (
+                "Especie identificada: cucaracha alemana (tamaño/color Y "
+                "ubicación coinciden). Ya puedes explicar el tratamiento y, "
+                "si el lead lo pide, cotizar — usa el conocimiento del "
+                "negocio cargado para esta especie."
+            ),
+        }
+    if americana_completa:
+        return {
+            "ok": True,
+            "especie": "americana",
+            "instrucciones": (
+                "Especie identificada: cucaracha americana (tamaño/color Y "
+                "ubicación coinciden). Ya puedes explicar el tratamiento y, "
+                "si el lead lo pide, cotizar — usa el conocimiento del "
+                "negocio cargado para esta especie."
+            ),
+        }
+    tiene_alguna_senal = alemana_tc or alemana_ub or americana_tc or americana_ub
+    if not tiene_alguna_senal:
         return {
             "ok": True,
             "especie": "no_concluyente",
@@ -58,29 +97,31 @@ def _clasificar_cucaracha(tamano_color: str, ubicacion: str) -> dict[str, Any]:
                 "No hay suficiente información para identificar la especie. "
                 "Pregunta de nuevo, con más detalle, por el tamaño/color y "
                 "por dónde exactamente la ha visto — no cotices ni agendes "
-                "todavía."
+                "todavía, y no nombres ninguna especie todavía."
             ),
         }
-    if alemana_hits == americana_hits:
-        return {
-            "ok": True,
-            "especie": "ambigua",
-            "instrucciones": (
-                "Los datos no distinguen con claridad entre las dos especies. "
-                "Pregunta UN detalle más (p.ej. si la ha visto también en "
-                "patio/coladeras, o solo dentro de la cocina) y vuelve a "
-                "llamar esta herramienta — no cotices ni agendes todavía."
-            ),
-        }
-    especie = "alemana" if alemana_hits > americana_hits else "americana"
+    # Hay AL MENOS una señal pero no las dos categorías coinciden en la misma
+    # especie (falta una categoría, o se contradicen entre sí).
+    falta_ubicacion = (alemana_tc or americana_tc) and not (alemana_ub or americana_ub)
+    if falta_ubicacion:
+        pista = (
+            "Tienes tamaño/color pero falta ubicación real. Pregunta "
+            "EXACTAMENTE dónde la ha visto (p.ej. cocina/atrás del refri, o "
+            "patio/coladera) — un dato de tamaño o color solo NUNCA basta "
+            "para nombrar la especie. No cotices ni agendes todavía, y no "
+            "nombres ninguna especie todavía."
+        )
+    else:
+        pista = (
+            "Los datos no distinguen con claridad entre las dos especies "
+            "(se contradicen o falta tamaño/color). Pregunta UN detalle más "
+            "y vuelve a llamar esta herramienta — no cotices ni agendes "
+            "todavía, y no nombres ninguna especie todavía."
+        )
     return {
         "ok": True,
-        "especie": especie,
-        "instrucciones": (
-            f"Especie identificada: cucaracha {especie}. Ya puedes explicar "
-            "el tratamiento y, si el lead lo pide, cotizar — usa el "
-            "conocimiento del negocio cargado para esta especie."
-        ),
+        "especie": "ambigua" if not falta_ubicacion else "no_concluyente",
+        "instrucciones": pista,
     }
 
 TOOL_SCHEMAS: list[dict[str, Any]] = [

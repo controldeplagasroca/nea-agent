@@ -299,3 +299,29 @@ async def test_identificar_plaga_ambigua_pide_mas_detalle(runtime_y_ctx):
     )
     assert result["ok"] is True
     assert result["especie"] == "ambigua"
+
+
+async def test_identificar_plaga_solo_tamano_no_concluye(runtime_y_ctx):
+    """Regresión: una sola palabra de tamaño/color (sin ubicación real) NO
+    debe declarar la especie — se vio en vivo que "chiquita" solo bastaba
+    para que el bot dijera "es cucaracha alemana" sin haber pedido dónde la
+    vio, y luego se re-clasificaba en automático con cada palabra nueva."""
+    runtime, ctx, conv = runtime_y_ctx
+    result = await runtime.execute(
+        "identificar_plaga",
+        {"tamano_color": "chiquita, cafecita", "ubicacion": "no sé, no me fijé"},
+    )
+    assert result["ok"] is True
+    assert result["especie"] != "alemana"
+    assert result["especie"] != "americana"
+
+
+async def test_identificar_plaga_solo_ubicacion_no_concluye(runtime_y_ctx):
+    runtime, ctx, conv = runtime_y_ctx
+    result = await runtime.execute(
+        "identificar_plaga",
+        {"tamano_color": "no sé", "ubicacion": "cerca de la coladera"},
+    )
+    assert result["ok"] is True
+    assert result["especie"] != "alemana"
+    assert result["especie"] != "americana"
