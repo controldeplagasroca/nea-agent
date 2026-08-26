@@ -51,6 +51,75 @@ class FakeLLM:
         return self.transcript_text
 
 
+class FakeCalendar:
+    """Calendario fake: registra llamadas y entrega resultados en cola, sin
+    pegarle a Google. La lógica real de disponibilidad vive en app/gcal.py y
+    se prueba aparte en tests/test_gcal.py; aquí solo importa que tools.py
+    orqueste bien lo que el calendario le devuelva."""
+
+    def __init__(self) -> None:
+        self.availability_calls: list[dict[str, Any]] = []
+        self.booking_calls: list[dict[str, Any]] = []
+        self.reschedule_calls: list[dict[str, Any]] = []
+        self.availability_queue: list[list[dict[str, Any]]] = []
+        self.create_result: dict[str, Any] | Exception = {"event_id": "evt_1"}
+        self.reschedule_result: dict[str, Any] | Exception = {}
+
+    async def get_availability(
+        self, service_key: str, limit: int = 12, per_day: int = 3, days: int = 5,
+    ) -> list[dict[str, Any]]:
+        self.availability_calls.append(
+            {"service_key": service_key, "limit": limit, "per_day": per_day, "days": days}
+        )
+        if self.availability_queue:
+            return self.availability_queue.pop(0)
+        return []
+
+    async def create_booking(
+        self, start_utc: Any, end_utc: Any, summary: str, description: str, service_key: str,
+    ) -> dict[str, Any]:
+        self.booking_calls.append(
+            {
+                "start_utc": start_utc,
+                "end_utc": end_utc,
+                "summary": summary,
+                "description": description,
+                "service_key": service_key,
+            }
+        )
+        if isinstance(self.create_result, Exception):
+            raise self.create_result
+        return self.create_result
+
+    async def reschedule_booking(
+        self,
+        event_id: str,
+        old_start: Any,
+        old_end: Any,
+        new_start: Any,
+        new_end: Any,
+        summary: str,
+        description: str,
+        service_key: str,
+    ) -> dict[str, Any]:
+        self.reschedule_calls.append(
+            {
+                "event_id": event_id,
+                "old_start": old_start,
+                "old_end": old_end,
+                "new_start": new_start,
+                "new_end": new_end,
+                "service_key": service_key,
+            }
+        )
+        if isinstance(self.reschedule_result, Exception):
+            raise self.reschedule_result
+        return self.reschedule_result
+
+    async def aclose(self) -> None:
+        return None
+
+
 def make_settings(**overrides: Any) -> Settings:
     values: dict[str, Any] = dict(
         verify_token="vtoken",
@@ -72,13 +141,18 @@ def make_settings(**overrides: Any) -> Settings:
     return Settings(_env_file=None, **values)
 
 
-def make_ctx(settings: Settings | None = None, llm: FakeLLM | None = None) -> AppContext:
+def make_ctx(
+    settings: Settings | None = None,
+    llm: FakeLLM | None = None,
+    calendar: Any | None = None,
+) -> AppContext:
     settings = settings or make_settings()
     return AppContext(
         settings=settings,
         store=MemoryStore(),
         crm=CrmClient(settings.crm_base_url, settings.crm_bot_api_key),
         llm=llm or FakeLLM(),
+        calendar=calendar if calendar is not None else FakeCalendar(),
     )
 
 
@@ -94,6 +168,7 @@ async def client(ctx: AppContext):
     async with httpx.AsyncClient(transport=transport, base_url="http://bot.test") as c:
         yield c
     await ctx.crm.aclose()
+    await ctx.calendar.aclose()
 
 
 def wa_payload(

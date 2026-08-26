@@ -64,6 +64,12 @@ class Settings(BaseSettings):
     # "Escribiendo…" casi inmediato al recibir un mensaje (antes del coalesce).
     typing_delay_seconds: float = 0.5
 
+    # Agenda (Google Calendar; motor propio — vocero-crm no lo trae a
+    # propósito, ver su README / issue #8 de kevinrivm/vocero-crm)
+    google_service_account_json: str = ""  # JSON completo de la cuenta de servicio, en una línea
+    google_calendar_id: str = ""  # calendario compartido con el email de esa cuenta de servicio
+    booking_lead_hours: float = 24.0  # anticipación mínima para agendar/reagendar
+
     # Infra
     database_url: str = ""
     port: int = 8000

@@ -6,3 +6,5 @@ openai>=1.40,<3
 pydantic-settings>=2.4,<3.0
 tzdata>=2024.1
 pypdf>=5.1
+google-auth>=2.29,<3
+requests>=2.31,<3  # transporte síncrono que usa google-auth para refrescar el token

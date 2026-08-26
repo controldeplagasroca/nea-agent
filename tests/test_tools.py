@@ -1,18 +1,26 @@
-"""Tools: book_session SOLO acepta slots ofrecidos; slot_taken trae alternativas."""
+"""Tools: book_session SOLO acepta slots ofrecidos; slot_taken trae alternativas.
+
+Las herramientas de agenda (propose_slots/book_session/reschedule_session)
+hablan con app.gcal.GoogleCalendarClient — aquí se prueba la ORQUESTACIÓN
+(tools.py) contra tests.conftest.FakeCalendar; la lógica real de
+disponibilidad/duración/ventanas por servicio se prueba en tests/test_gcal.py.
+"""
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import httpx
 import pytest
 
+from app.gcal import CalendarSlotTaken
 from app.state import OfferedSlot
 from app.tools import ToolRuntime
 from tests.conftest import CRM_CONV_ID, CRM_URL, IDENTITY, make_ctx
 
 SLOT_ISO = "2026-07-20T16:00:00Z"
 SLOT_DT = datetime(2026, 7, 20, 16, 0, tzinfo=timezone.utc)
+SLOT_END_DT = SLOT_DT + timedelta(minutes=90)  # duración de "alemana"
 
 
 @pytest.fixture
@@ -25,8 +33,9 @@ async def runtime_y_ctx():
             OfferedSlot(
                 conversation_id=conv.id,
                 start_utc=SLOT_DT,
-                end_utc=None,
+                end_utc=SLOT_END_DT,
                 label="lunes 20 de julio, 10:00 am",
+                service_key="alemana",
             )
         ],
     )
@@ -35,34 +44,19 @@ async def runtime_y_ctx():
     await ctx.crm.aclose()
 
 
-async def test_book_rechaza_slot_no_ofrecido(runtime_y_ctx, respx_mock):
+async def test_book_rechaza_slot_no_ofrecido(runtime_y_ctx):
     runtime, ctx, conv = runtime_y_ctx
-    bookings = respx_mock.post(f"{CRM_URL}/api/bot/bookings").mock(
-        return_value=httpx.Response(200, json={"bookingId": "bk_1", "label": "x"})
-    )
     result = await runtime.execute(
         "book_session", {"start_utc": "2026-07-20T17:00:00Z"}  # nunca ofrecido
     )
     assert result["ok"] is False
     assert result["error"] == "slot_no_ofrecido"
-    assert bookings.call_count == 0  # jamás llegó al CRM
+    assert ctx.calendar.booking_calls == []  # jamás llegó a la agenda
     assert runtime.booked is False
 
 
 async def test_book_acepta_slot_ofrecido_epoch_exacto(runtime_y_ctx, respx_mock):
     runtime, ctx, conv = runtime_y_ctx
-    bookings = respx_mock.post(f"{CRM_URL}/api/bot/bookings").mock(
-        # 201 Created: el código REAL del CRM (route.ts responde 201, no 200 —
-        # el mock infiel escondió este bug hasta la certificación 002).
-        return_value=httpx.Response(
-            201,
-            json={
-                "bookingId": "bk_1",
-                "zoomJoinUrl": "https://zoom.us/j/1",
-                "label": "lunes 20 de julio, 10:00 am",
-            },
-        )
-    )
     respx_mock.put(f"{CRM_URL}/api/bot/ficha").mock(
         return_value=httpx.Response(200, json={"ficha": {}, "stageMoved": True})
     )
@@ -72,30 +66,25 @@ async def test_book_acepta_slot_ofrecido_epoch_exacto(runtime_y_ctx, respx_mock)
     )
     assert result["ok"] is True
     assert runtime.booked is True
-    body = json.loads(bookings.calls[0].request.content)
-    assert body == {"conversationId": CRM_CONV_ID, "startUtc": SLOT_ISO}
-    # al reservar se limpian los ofrecidos
+    call = ctx.calendar.booking_calls[0]
+    assert call["start_utc"] == SLOT_DT
+    assert call["end_utc"] == SLOT_END_DT
+    assert call["service_key"] == "alemana"
+    # al reservar se limpian los ofrecidos y queda la cita activa rastreada
     assert await ctx.store.get_offered_slots(conv.id) == []
+    active = await ctx.store.get_active_calendar_booking(conv.id)
+    assert active is not None
+    assert active.google_event_id == "evt_1"
+    assert active.start_utc == SLOT_DT
 
 
-async def test_book_slot_taken_ofrece_alternativas_frescas(runtime_y_ctx, respx_mock):
+async def test_book_slot_taken_ofrece_alternativas_frescas(runtime_y_ctx):
     runtime, ctx, conv = runtime_y_ctx
     frescos = [
         {"startUtc": "2026-07-21T16:00:00Z", "endUtc": None, "label": "martes 21, 10:00 am"},
         {"startUtc": "2026-07-21T17:00:00Z", "endUtc": None, "label": "martes 21, 11:00 am"},
     ]
-    respx_mock.post(f"{CRM_URL}/api/bot/bookings").mock(
-        # Forma REAL del CRM: el código va anidado bajo "error". El mock plano
-        # de antes escondía que en producción ningún 409 se reconocía y este
-        # camino estaba muerto.
-        return_value=httpx.Response(
-            409,
-            json={
-                "error": {"code": "slot_taken", "message": "ocupado"},
-                "slots": frescos,
-            },
-        )
-    )
+    ctx.calendar.create_result = CalendarSlotTaken(frescos)
     result = await runtime.execute("book_session", {"start_utc": SLOT_ISO})
     assert result["ok"] is False
     assert result["error"] == "slot_taken"
@@ -106,9 +95,7 @@ async def test_book_slot_taken_ofrece_alternativas_frescas(runtime_y_ctx, respx_
     assert runtime.booked is False
 
 
-async def test_propose_slots_pide_reparto_por_dia_y_persiste_todos(
-    runtime_y_ctx, respx_mock
-):
+async def test_propose_slots_pide_reparto_por_dia_y_persiste_todos(runtime_y_ctx):
     """El catálogo reservable es ancho a propósito: guardar solo 3 dejaba al
     agente sin nada que ofrecer cuando el lead pedía otro día. El "máximo 3"
     es cuántos SE ENSEÑAN, y eso lo gobierna el prompt."""
@@ -121,18 +108,34 @@ async def test_propose_slots_pide_reparto_por_dia_y_persiste_todos(
         }
         for d in range(6)
     ]
-    route = respx_mock.get(f"{CRM_URL}/api/bot/availability").mock(
-        return_value=httpx.Response(200, json={"slots": seis})
-    )
-    result = await runtime.execute("propose_slots", {})
+    ctx.calendar.availability_queue = [seis]
+    result = await runtime.execute("propose_slots", {"servicio": "alemana"})
     assert result["ok"] is True
     assert len(result["slots"]) == 6
     assert len(await ctx.store.get_offered_slots(conv.id)) == 6
     assert runtime.proposed is True
-    # El reparto se le pide al CRM, no se improvisa aquí.
-    params = route.calls[0].request.url.params
-    assert params["perDay"] == "3"
-    assert params["days"] == "5"
+    # El reparto se le pide a la agenda, no se improvisa aquí.
+    call = ctx.calendar.availability_calls[0]
+    assert call["service_key"] == "alemana"
+    assert call["per_day"] == 3
+    assert call["days"] == 5
+
+
+async def test_propose_slots_servicio_no_reconocido(runtime_y_ctx):
+    runtime, ctx, conv = runtime_y_ctx
+    result = await runtime.execute("propose_slots", {"servicio": "moscas"})
+    assert result["ok"] is False
+    assert result["error"] == "servicio_no_agendable"
+    assert ctx.calendar.availability_calls == []
+
+
+async def test_propose_slots_termita_no_se_agenda_sola(runtime_y_ctx):
+    """Termita (madera seca) es 'bajo consulta' — nunca auto-agendada."""
+    runtime, ctx, conv = runtime_y_ctx
+    result = await runtime.execute("propose_slots", {"servicio": "termita de madera seca"})
+    assert result["ok"] is False
+    assert result["error"] == "servicio_no_agendable"
+    assert ctx.calendar.availability_calls == []
 
 
 async def test_update_ficha_manda_lo_que_haya(runtime_y_ctx, respx_mock):
@@ -173,36 +176,29 @@ async def test_crm_caido_en_tool_no_tumba_el_turno(runtime_y_ctx, respx_mock):
     assert result["error"] == "crm_error"
 
 
-async def test_propose_slots_etiqueta_con_el_dia_en_palabras(
-    runtime_y_ctx, respx_mock
-):
+async def test_propose_slots_etiqueta_con_el_dia_en_palabras(runtime_y_ctx):
     """La etiqueta corta ("vie 7 ago, 10:30") se presta a que el lead entienda
     otro día — basta un "10:30, de mañana" para agendar mal."""
     runtime, ctx, conv = runtime_y_ctx
-    respx_mock.get(f"{CRM_URL}/api/bot/availability").mock(
-        return_value=httpx.Response(
-            200,
-            json={
-                "slots": [
-                    {
-                        "startUtc": "2026-08-07T16:30:00Z",
-                        "endUtc": "2026-08-07T17:00:00Z",
-                        "label": "vie 7 ago, 10:30",
-                        "dayLabel": "hoy viernes 7 de agosto",
-                        "time": "10:30",
-                    },
-                    {
-                        "startUtc": "2026-08-10T15:00:00Z",
-                        "endUtc": "2026-08-10T15:30:00Z",
-                        "label": "lun 10 ago, 09:00",
-                        "dayLabel": "lunes 10 de agosto",
-                        "time": "09:00",
-                    },
-                ]
+    ctx.calendar.availability_queue = [
+        [
+            {
+                "startUtc": "2026-08-07T16:30:00Z",
+                "endUtc": "2026-08-07T17:00:00Z",
+                "label": "vie 7 ago, 10:30",
+                "dayLabel": "hoy viernes 7 de agosto",
+                "time": "10:30",
             },
-        )
-    )
-    result = await runtime.execute("propose_slots", {})
+            {
+                "startUtc": "2026-08-10T15:00:00Z",
+                "endUtc": "2026-08-10T15:30:00Z",
+                "label": "lun 10 ago, 09:00",
+                "dayLabel": "lunes 10 de agosto",
+                "time": "09:00",
+            },
+        ]
+    ]
+    result = await runtime.execute("propose_slots", {"servicio": "alemana"})
     assert [s["label"] for s in result["slots"]] == [
         "hoy viernes 7 de agosto, 10:30",
         "lunes 10 de agosto, 09:00",
@@ -213,52 +209,48 @@ async def test_propose_slots_etiqueta_con_el_dia_en_palabras(
     ]
 
 
-async def test_reschedule_mueve_la_cita_sin_handoff(runtime_y_ctx, respx_mock):
+async def test_reschedule_mueve_la_cita_sin_handoff(runtime_y_ctx):
     """Antes esto era handoff obligado y el lead se quedaba sin nadie."""
     runtime, ctx, conv = runtime_y_ctx
-    patch = respx_mock.patch(f"{CRM_URL}/api/bot/bookings").mock(
-        return_value=httpx.Response(
-            200, json={"bookingId": "bk_1", "zoomJoinUrl": "https://meet.test/1"}
-        )
-    )
+    old_start = SLOT_DT - timedelta(days=7)
+    old_end = old_start + timedelta(minutes=90)
+    await ctx.store.save_calendar_booking(conv.id, "evt_old", "alemana", old_start, old_end)
+
     result = await runtime.execute(
         "reschedule_session",
         {"start_utc": SLOT_ISO, "dia_confirmado": "sí, el lunes 20"},
     )
     assert result["ok"] is True
     assert result["label"] == "lunes 20 de julio, 10:00 am"
-    assert json.loads(patch.calls[0].request.content) == {
-        "conversationId": CRM_CONV_ID,
-        "startUtc": SLOT_ISO,
-    }
+    call = ctx.calendar.reschedule_calls[0]
+    assert call["event_id"] == "evt_old"
+    assert call["old_start"] == old_start
+    assert call["new_start"] == SLOT_DT
     assert await ctx.store.get_offered_slots(conv.id) == []
+    active = await ctx.store.get_active_calendar_booking(conv.id)
+    assert active is not None
+    assert active.start_utc == SLOT_DT
 
 
-async def test_reschedule_rechaza_slot_no_ofrecido(runtime_y_ctx, respx_mock):
+async def test_reschedule_rechaza_slot_no_ofrecido(runtime_y_ctx):
     runtime, ctx, conv = runtime_y_ctx
-    patch = respx_mock.patch(f"{CRM_URL}/api/bot/bookings").mock(
-        return_value=httpx.Response(200, json={})
-    )
     result = await runtime.execute(
         "reschedule_session",
         {"start_utc": "2026-07-20T17:00:00Z", "dia_confirmado": "el lunes"},
     )
     assert result["error"] == "slot_no_ofrecido"
-    assert patch.call_count == 0
+    assert ctx.calendar.reschedule_calls == []
 
 
-async def test_reschedule_sin_cita_manda_a_book(runtime_y_ctx, respx_mock):
+async def test_reschedule_sin_cita_manda_a_book(runtime_y_ctx):
     runtime, ctx, conv = runtime_y_ctx
-    respx_mock.patch(f"{CRM_URL}/api/bot/bookings").mock(
-        return_value=httpx.Response(
-            404, json={"error": {"code": "no_booking", "message": "sin cita"}}
-        )
-    )
+    # sin cita activa previa sembrada — el estado por defecto del fixture
     result = await runtime.execute(
         "reschedule_session", {"start_utc": SLOT_ISO, "dia_confirmado": "el lunes"}
     )
     assert result["ok"] is False
     assert result["error"] == "sin_cita"
+    assert ctx.calendar.reschedule_calls == []
 
 
 async def test_identificar_plaga_alemana_por_cocina(runtime_y_ctx):

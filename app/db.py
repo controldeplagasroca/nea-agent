@@ -11,7 +11,14 @@ from typing import Any
 
 import asyncpg
 
-from app.state import BotMessage, Conversation, OfferedSlot, PendingSend, RelayItem
+from app.state import (
+    BotMessage,
+    CalendarBooking,
+    Conversation,
+    OfferedSlot,
+    PendingSend,
+    RelayItem,
+)
 
 logger = logging.getLogger("nea.db")
 
@@ -41,6 +48,18 @@ def _conv_from_row(row: asyncpg.Record) -> Conversation:
         followup_sent=row["followup_sent"],
         last_inbound_at=row["last_inbound_at"],
         stalled_at=row["stalled_at"],
+    )
+
+
+def _booking_from_row(row: asyncpg.Record) -> CalendarBooking:
+    return CalendarBooking(
+        id=row["id"],
+        conversation_id=row["conversation_id"],
+        google_event_id=row["google_event_id"],
+        service_key=row["service_key"],
+        start_utc=row["start_utc"],
+        end_utc=row["end_utc"],
+        created_at=row["created_at"],
     )
 
 
@@ -243,13 +262,15 @@ class PgStore:
                 for slot in slots:
                     await conn.execute(
                         """
-                        INSERT INTO offered_slots (conversation_id, start_utc, end_utc, label)
-                        VALUES ($1, $2, $3, $4)
+                        INSERT INTO offered_slots
+                            (conversation_id, start_utc, end_utc, label, service_key)
+                        VALUES ($1, $2, $3, $4, $5)
                         """,
                         conversation_id,
                         slot.start_utc,
                         slot.end_utc,
                         slot.label,
+                        slot.service_key,
                     )
 
     async def get_offered_slots(self, conversation_id: int) -> list[OfferedSlot]:
@@ -264,6 +285,7 @@ class PgStore:
                 end_utc=r["end_utc"],
                 label=r["label"],
                 offered_at=r["offered_at"],
+                service_key=r["service_key"],
             )
             for r in rows
         ]
@@ -271,6 +293,58 @@ class PgStore:
     async def clear_offered_slots(self, conversation_id: int) -> None:
         await self.pool.execute(
             "DELETE FROM offered_slots WHERE conversation_id = $1", conversation_id
+        )
+
+    # ----------------------------------------------------- agenda (gcal) ---
+
+    async def save_calendar_booking(
+        self,
+        conversation_id: int,
+        google_event_id: str,
+        service_key: str,
+        start_utc: datetime,
+        end_utc: datetime,
+    ) -> CalendarBooking:
+        row = await self.pool.fetchrow(
+            """
+            INSERT INTO calendar_bookings
+                (conversation_id, google_event_id, service_key, start_utc, end_utc)
+            VALUES ($1, $2, $3, $4, $5)
+            RETURNING *
+            """,
+            conversation_id,
+            google_event_id,
+            service_key,
+            start_utc,
+            end_utc,
+        )
+        assert row is not None
+        return _booking_from_row(row)
+
+    async def get_active_calendar_booking(
+        self, conversation_id: int
+    ) -> CalendarBooking | None:
+        row = await self.pool.fetchrow(
+            """
+            SELECT * FROM calendar_bookings
+            WHERE conversation_id = $1 AND canceled_at IS NULL
+            ORDER BY start_utc DESC LIMIT 1
+            """,
+            conversation_id,
+        )
+        return _booking_from_row(row) if row is not None else None
+
+    async def update_calendar_booking_time(
+        self, conversation_id: int, start_utc: datetime, end_utc: datetime
+    ) -> None:
+        await self.pool.execute(
+            """
+            UPDATE calendar_bookings SET start_utc = $2, end_utc = $3
+            WHERE conversation_id = $1 AND canceled_at IS NULL
+            """,
+            conversation_id,
+            start_utc,
+            end_utc,
         )
 
     # ------------------------------------------------- envíos pendientes ---

@@ -8,10 +8,11 @@ turno.
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from app.crm import CrmConflict, CrmError, SlotTaken
+from app.crm import CrmError
+from app.gcal import SERVICE_RULES, CalendarError, CalendarSlotTaken
 from app.profile import BusinessProfile
 from app.state import AppContext, Conversation, OfferedSlot
 
@@ -124,6 +125,36 @@ def _clasificar_cucaracha(tamano_color: str, ubicacion: str) -> dict[str, Any]:
         "instrucciones": pista,
     }
 
+# Palabras para mapear el texto libre del LLM a una clave de
+# app.gcal.SERVICE_RULES — tolerante a como lo escriba ("cucaracha alemana",
+# "hormigas", "araña"), igual que _clasificar_cucaracha arriba.
+_SERVICIO_PALABRAS: dict[str, tuple[str, ...]] = {
+    "alemana": ("alemana",),
+    "americana": ("americana",),
+    "chinches": ("chinche",),
+    "hormiga": ("hormiga",),
+    "pulgas": ("pulga",),
+    "roedores": ("roedor", "rata", "raton"),
+    "alacran_arana": ("alacran", "arana"),
+}
+# Termita (madera seca) es "bajo consulta" — nunca se agenda sola, siempre
+# handoff. No vive en SERVICE_RULES/gcal a propósito.
+_SERVICIO_BAJO_CONSULTA = ("termita",)
+
+
+def _normalizar_servicio(texto: str) -> str | None:
+    t = _sin_acentos(texto.lower())
+    for key, palabras in _SERVICIO_PALABRAS.items():
+        if any(p in t for p in palabras):
+            return key
+    return None
+
+
+def _es_bajo_consulta(texto: str) -> bool:
+    t = _sin_acentos(texto.lower())
+    return any(p in t for p in _SERVICIO_BAJO_CONSULTA)
+
+
 TOOL_SCHEMAS: list[dict[str, Any]] = [
     {
         "type": "function",
@@ -160,14 +191,30 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
         "function": {
             "name": "propose_slots",
             "description": (
-                "Consulta la disponibilidad real de la agenda del negocio. Te "
+                "Consulta la disponibilidad real de la agenda del negocio PARA "
+                "LA PLAGA YA IDENTIFICADA (cada servicio dura distinto). Te "
                 "regresa los huecos libres REPARTIDOS entre los próximos días, "
                 "cada uno con su día en palabras (hoy/mañana/nombre del día). "
                 "Ofrece al lead máximo 3, los que embonen con lo que pidió. Si "
                 "el día que pidió no aparece, es que no hay agenda ese día: "
-                "dilo. SOLO estos horarios serán reservables después."
+                "dilo. SOLO estos horarios serán reservables después. Termita "
+                "NO se agenda aquí (bajo consulta) — usa handoff para esa."
             ),
-            "parameters": {"type": "object", "properties": {}},
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "servicio": {
+                        "type": "string",
+                        "description": (
+                            "La plaga ya identificada: alemana | americana | "
+                            "chinches | hormiga | pulgas | roedores | "
+                            "alacran_arana (alacrán o araña, mismo tratamiento "
+                            "base)."
+                        ),
+                    }
+                },
+                "required": ["servicio"],
+            },
         },
     },
     {
@@ -325,9 +372,11 @@ def _label_of(raw: dict[str, Any], start: datetime) -> str:
 
 
 def _slots_from_payload(
-    conversation_id: int, raw_slots: list[dict[str, Any]]
+    conversation_id: int, raw_slots: list[dict[str, Any]], service_key: str
 ) -> list[OfferedSlot]:
-    """Convierte slots del CRM ({startUtc,endUtc,label}) a OfferedSlot, tolerante."""
+    """Convierte slots de la agenda ({startUtc,endUtc,label}) a OfferedSlot,
+    tolerante. `service_key` es el servicio para el que se generaron —
+    book_session lo reusa tal cual para armar el evento de Google Calendar."""
     out: list[OfferedSlot] = []
     for raw in raw_slots[:MAX_OFFERED]:
         start = _parse_utc(str(raw.get("startUtc") or ""))
@@ -340,6 +389,7 @@ def _slots_from_payload(
                 start_utc=start,
                 end_utc=end,
                 label=_label_of(raw, start),
+                service_key=service_key,
             )
         )
     return out
@@ -374,7 +424,7 @@ class ToolRuntime:
             if name == "update_ficha":
                 return await self._update_ficha(args)
             if name == "propose_slots":
-                return await self._propose_slots()
+                return await self._propose_slots(args)
             if name == "book_session":
                 return await self._book_session(args)
             if name == "reschedule_session":
@@ -394,6 +444,13 @@ class ToolRuntime:
                 "error": "crm_error",
                 "detalle": "no pude completar la acción; continúa la conversación o haz handoff",
             }
+        except CalendarError as exc:
+            logger.warning("tools: %s falló contra la agenda: %s", name, exc)
+            return {
+                "ok": False,
+                "error": "agenda_error",
+                "detalle": "no pude completar la acción en la agenda; continúa la conversación o haz handoff",
+            }
 
     async def _update_ficha(self, args: dict[str, Any]) -> dict[str, Any]:
         # Tolera el drift del LLM: manda lo que haya, el CRM normaliza flojo.
@@ -403,11 +460,25 @@ class ToolRuntime:
         await self._ctx.crm.put_ficha(self._crm_conv_id, ficha)
         return {"ok": True}
 
-    async def _propose_slots(self) -> dict[str, Any]:
-        raw = await self._ctx.crm.get_availability(
-            limit=MAX_OFFERED, per_day=OFFER_PER_DAY, days=OFFER_DAYS
+    async def _propose_slots(self, args: dict[str, Any]) -> dict[str, Any]:
+        servicio_raw = str(args.get("servicio") or "")
+        servicio = _normalizar_servicio(servicio_raw)
+        if servicio is None:
+            bajo_consulta = _es_bajo_consulta(servicio_raw)
+            return {
+                "ok": False,
+                "error": "servicio_no_agendable",
+                "detalle": (
+                    "esta plaga es bajo consulta y no se agenda sola — haz "
+                    "handoff para coordinar directo"
+                    if bajo_consulta
+                    else "no reconozco ese servicio; usa una plaga del catálogo o haz handoff"
+                ),
+            }
+        raw = await self._ctx.calendar.get_availability(
+            servicio, limit=MAX_OFFERED, per_day=OFFER_PER_DAY, days=OFFER_DAYS
         )
-        slots = _slots_from_payload(self._conv.id, raw)
+        slots = _slots_from_payload(self._conv.id, raw, servicio)
         if not slots:
             return {
                 "ok": False,
@@ -475,17 +546,27 @@ class ToolRuntime:
         )
         return chosen, None
 
+    def _resumen_evento(self, service_key: str) -> str:
+        rule = SERVICE_RULES.get(service_key)
+        etiqueta = rule.label if rule is not None else service_key
+        return f"Visita {etiqueta} — {self._conv.wa_identity}"
+
     async def _book_session(self, args: dict[str, Any]) -> dict[str, Any]:
         chosen, error = await self._resolve_offered(args, "book_session")
         if error is not None or chosen is None:
             return error or {"ok": False, "error": "slot_no_ofrecido"}
+        end = chosen.end_utc or (chosen.start_utc + timedelta(hours=1))
         try:
-            result = await self._ctx.crm.create_booking(
-                self._crm_conv_id, _iso_z(chosen.start_utc)
+            result = await self._ctx.calendar.create_booking(
+                chosen.start_utc,
+                end,
+                self._resumen_evento(chosen.service_key),
+                f"Agendado por Nea. Conversación CRM {self._crm_conv_id}.",
+                chosen.service_key,
             )
-        except SlotTaken as exc:
+        except CalendarSlotTaken as exc:
             # El slot se ocupó entre oferta y elección: alternativas frescas.
-            fresh = _slots_from_payload(self._conv.id, exc.slots)
+            fresh = _slots_from_payload(self._conv.id, exc.slots, chosen.service_key)
             await self._ctx.store.replace_offered_slots(self._conv.id, fresh)
             return {
                 "ok": False,
@@ -494,6 +575,9 @@ class ToolRuntime:
                 "slots": _slots_for_llm(fresh),
             }
         await self._ctx.store.clear_offered_slots(self._conv.id)
+        await self._ctx.store.save_calendar_booking(
+            self._conv.id, result["event_id"], chosen.service_key, chosen.start_utc, end
+        )
         self.booked = True
         try:
             await self._ctx.crm.put_ficha(
@@ -503,14 +587,10 @@ class ToolRuntime:
             logger.warning("tools: no pude actualizar ficha tras booking: %s", exc)
         return {
             "ok": True,
-            # La etiqueta del slot ofrecido trae el día en palabras; la del
-            # CRM es la corta. Se repite ESTA para que el lead lea el día.
-            "label": chosen.label or result.get("label"),
-            "zoom_url": result.get("zoomJoinUrl"),
+            "label": chosen.label,
             "instrucciones": (
-                "confirma el día COMPLETO y la hora tal cual dice label, "
-                "comparte el link de la videollamada si existe y menciona lo "
-                "que el negocio pida para llegar preparado"
+                "confirma el día COMPLETO y la hora tal cual dice label, y "
+                "menciona lo que el negocio pida para llegar preparado"
             ),
         }
 
@@ -518,12 +598,27 @@ class ToolRuntime:
         chosen, error = await self._resolve_offered(args, "reschedule_session")
         if error is not None or chosen is None:
             return error or {"ok": False, "error": "slot_no_ofrecido"}
+        active = await self._ctx.store.get_active_calendar_booking(self._conv.id)
+        if active is None:
+            return {
+                "ok": False,
+                "error": "sin_cita",
+                "detalle": "el lead no tiene cita por delante; usa book_session",
+            }
+        end = chosen.end_utc or (chosen.start_utc + timedelta(hours=1))
         try:
-            result = await self._ctx.crm.reschedule_booking(
-                self._crm_conv_id, _iso_z(chosen.start_utc)
+            await self._ctx.calendar.reschedule_booking(
+                active.google_event_id,
+                active.start_utc,
+                active.end_utc,
+                chosen.start_utc,
+                end,
+                self._resumen_evento(chosen.service_key),
+                f"Agendado por Nea. Conversación CRM {self._crm_conv_id}.",
+                chosen.service_key,
             )
-        except SlotTaken as exc:
-            fresh = _slots_from_payload(self._conv.id, exc.slots)
+        except CalendarSlotTaken as exc:
+            fresh = _slots_from_payload(self._conv.id, exc.slots, chosen.service_key)
             await self._ctx.store.replace_offered_slots(self._conv.id, fresh)
             return {
                 "ok": False,
@@ -531,24 +626,15 @@ class ToolRuntime:
                 "detalle": "ese horario se acaba de ocupar; discúlpate breve y ofrece estas alternativas",
                 "slots": _slots_for_llm(fresh),
             }
-        except CrmConflict as exc:
-            if exc.code == "no_booking":
-                return {
-                    "ok": False,
-                    "error": "sin_cita",
-                    "detalle": "el lead no tiene cita por delante; usa book_session",
-                }
-            raise
         await self._ctx.store.clear_offered_slots(self._conv.id)
+        await self._ctx.store.update_calendar_booking_time(self._conv.id, chosen.start_utc, end)
         self.booked = True
         return {
             "ok": True,
-            "label": chosen.label or result.get("label"),
-            "zoom_url": result.get("zoomJoinUrl"),
+            "label": chosen.label,
             "instrucciones": (
                 "confirma que quedó movida, con el día COMPLETO y la hora tal "
-                "cual dice label; el link de la videollamada sigue siendo el "
-                "mismo salvo que aquí venga otro"
+                "cual dice label"
             ),
         }
 

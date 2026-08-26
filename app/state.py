@@ -56,6 +56,25 @@ class OfferedSlot:
     end_utc: datetime | None
     label: str
     offered_at: datetime = field(default_factory=utcnow)
+    # Clave de app.gcal.SERVICE_RULES para la que se generó este hueco — la
+    # duración/ventana ya quedó fija al ofrecerlo; book_session la reusa tal
+    # cual para armar el evento de Google Calendar.
+    service_key: str = ""
+
+
+@dataclass
+class CalendarBooking:
+    """Cita activa en Google Calendar, rastreada localmente porque el
+    calendario no sabe nada de conversation_id (reschedule_session la
+    necesita para saber qué evento mover)."""
+
+    id: int
+    conversation_id: int
+    google_event_id: str
+    service_key: str
+    start_utc: datetime
+    end_utc: datetime
+    created_at: datetime = field(default_factory=utcnow)
 
 
 @dataclass
@@ -153,6 +172,22 @@ class Store(Protocol):
     async def get_offered_slots(self, conversation_id: int) -> list[OfferedSlot]: ...
     async def clear_offered_slots(self, conversation_id: int) -> None: ...
 
+    # cita activa en Google Calendar (motor propio, ver app/gcal.py)
+    async def save_calendar_booking(
+        self,
+        conversation_id: int,
+        google_event_id: str,
+        service_key: str,
+        start_utc: datetime,
+        end_utc: datetime,
+    ) -> CalendarBooking: ...
+    async def get_active_calendar_booking(
+        self, conversation_id: int
+    ) -> CalendarBooking | None: ...
+    async def update_calendar_booking_time(
+        self, conversation_id: int, start_utc: datetime, end_utc: datetime
+    ) -> None: ...
+
     # cola de envíos pendientes (respuestas que no pudieron salir en el turno)
     async def enqueue_pending_send(
         self, conversation_id: int, crm_conversation_id: str, content: str
@@ -189,6 +224,7 @@ class MemoryStore:
         self.messages: list[BotMessage] = []
         self.offered: dict[int, list[OfferedSlot]] = {}
         self.pending_sends: dict[int, PendingSend] = {}
+        self.calendar_bookings: dict[int, CalendarBooking] = {}  # por conversation_id, solo la activa
 
     async def mark_processed(self, wa_message_id: str) -> bool:
         if wa_message_id in self.processed:
@@ -287,6 +323,38 @@ class MemoryStore:
     async def clear_offered_slots(self, conversation_id: int) -> None:
         self.offered.pop(conversation_id, None)
 
+    async def save_calendar_booking(
+        self,
+        conversation_id: int,
+        google_event_id: str,
+        service_key: str,
+        start_utc: datetime,
+        end_utc: datetime,
+    ) -> CalendarBooking:
+        booking = CalendarBooking(
+            id=next(self._ids),
+            conversation_id=conversation_id,
+            google_event_id=google_event_id,
+            service_key=service_key,
+            start_utc=start_utc,
+            end_utc=end_utc,
+        )
+        self.calendar_bookings[conversation_id] = booking
+        return booking
+
+    async def get_active_calendar_booking(
+        self, conversation_id: int
+    ) -> CalendarBooking | None:
+        return self.calendar_bookings.get(conversation_id)
+
+    async def update_calendar_booking_time(
+        self, conversation_id: int, start_utc: datetime, end_utc: datetime
+    ) -> None:
+        booking = self.calendar_bookings.get(conversation_id)
+        if booking is not None:
+            booking.start_utc = start_utc
+            booking.end_utc = end_utc
+
     async def enqueue_pending_send(
         self, conversation_id: int, crm_conversation_id: str, content: str
     ) -> int:
@@ -353,6 +421,7 @@ class AppContext:
     store: Store
     crm: Any  # CrmClient
     llm: Any  # OpenAiLlm o fake con .complete()
+    calendar: Any = None  # GoogleCalendarClient / NullCalendarClient (app/gcal.py)
     profile: Any | None = None  # ProfileProvider; None en tests = perfil mínimo
     coalescer: Any | None = None
     relay_wake: asyncio.Event = field(default_factory=asyncio.Event)

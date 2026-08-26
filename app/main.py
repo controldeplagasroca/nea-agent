@@ -8,11 +8,12 @@ fake, CRM contra respx) y manejan los workers a mano.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 from contextlib import asynccontextmanager
 from functools import partial
 from pathlib import Path
-from typing import AsyncIterator
+from typing import Any, AsyncIterator
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
@@ -22,6 +23,7 @@ from app.config import Settings
 from app.crm import CrmClient
 from app.db import PgStore
 from app.followup import FollowupWorker
+from app.gcal import GoogleCalendarClient, NullCalendarClient
 from app.llm import OpenAiLlm
 from app.profile import ProfileProvider
 from app.relay import RelayWorker
@@ -46,6 +48,28 @@ def _wire_coalescer(ctx: AppContext) -> None:
         )
 
 
+def _build_calendar(settings: Settings) -> Any:
+    """GoogleCalendarClient si hay credenciales; si no, NullCalendarClient
+    (degrada sin tumbar el turno — Constitución de degradación silenciosa)."""
+    if not settings.google_service_account_json or not settings.google_calendar_id:
+        logger.warning(
+            "agenda: GOOGLE_SERVICE_ACCOUNT_JSON/GOOGLE_CALENDAR_ID sin "
+            "configurar — propose_slots devolverá error de agenda"
+        )
+        return NullCalendarClient()
+    try:
+        info = json.loads(settings.google_service_account_json)
+    except json.JSONDecodeError:
+        logger.error("agenda: GOOGLE_SERVICE_ACCOUNT_JSON no es JSON válido")
+        return NullCalendarClient()
+    return GoogleCalendarClient(
+        info,
+        settings.google_calendar_id,
+        settings.agent_timezone,
+        lead_hours=settings.booking_lead_hours,
+    )
+
+
 def create_app(ctx: AppContext | None = None) -> FastAPI:
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
@@ -61,6 +85,7 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
                 settings=settings,
                 store=store,
                 crm=crm,
+                calendar=_build_calendar(settings),
                 llm=OpenAiLlm(
                     settings.openai_api_key,
                     settings.openai_model,
@@ -96,6 +121,7 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
                 await c.coalescer.aclose()
             if own_resources:
                 await c.crm.aclose()
+                await c.calendar.aclose()
                 await c.store.aclose()
 
     app = FastAPI(title="Nea — agente de agendamiento para WhatsApp", lifespan=lifespan)
