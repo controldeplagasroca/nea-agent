@@ -282,6 +282,35 @@ async def test_cancel_sin_cita_no_llega_a_la_agenda(runtime_y_ctx):
     assert ctx.calendar.cancel_calls == []
 
 
+async def test_calcular_multiplicar_da_entero_limpio(runtime_y_ctx):
+    """Certificación en vivo (2026-09-06): el LLM cotizó $2,200 (rango 101-250
+    m²) para un depa de 5x10 -- nunca multiplicó, asumió el rango de más."""
+    runtime, ctx, conv = runtime_y_ctx
+    result = await runtime.execute("calcular", {"operacion": "multiplicar", "a": 5, "b": 10})
+    assert result == {"ok": True, "resultado": 50}
+
+
+async def test_calcular_sumar_y_restar(runtime_y_ctx):
+    runtime, ctx, conv = runtime_y_ctx
+    suma = await runtime.execute("calcular", {"operacion": "sumar", "a": 1500, "b": 200})
+    assert suma == {"ok": True, "resultado": 1700}
+    resta = await runtime.execute("calcular", {"operacion": "restar", "a": 10, "b": 3})
+    assert resta == {"ok": True, "resultado": 7}
+
+
+async def test_calcular_resultado_no_entero_se_conserva(runtime_y_ctx):
+    runtime, ctx, conv = runtime_y_ctx
+    result = await runtime.execute("calcular", {"operacion": "multiplicar", "a": 2.5, "b": 3})
+    assert result == {"ok": True, "resultado": 7.5}
+
+
+async def test_calcular_operacion_no_reconocida(runtime_y_ctx):
+    runtime, ctx, conv = runtime_y_ctx
+    result = await runtime.execute("calcular", {"operacion": "dividir", "a": 10, "b": 2})
+    assert result["ok"] is False
+    assert result["error"] == "operacion_no_reconocida"
+
+
 async def test_identificar_plaga_alemana_por_cocina(runtime_y_ctx):
     runtime, ctx, conv = runtime_y_ctx
     result = await runtime.execute(

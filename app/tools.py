@@ -1,5 +1,6 @@
 """Herramientas del LLM: update_ficha, propose_slots, book_session,
-reschedule_session, cancel_session, route_out, handoff.
+reschedule_session, cancel_session, route_out, identificar_plaga, calcular,
+handoff.
 
 La validación es server-side: `book_session` SOLO acepta slots previamente
 ofrecidos (tabla offered_slots, comparación por epoch exacto). Un fallo del
@@ -337,6 +338,33 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
     {
         "type": "function",
         "function": {
+            "name": "calcular",
+            "description": (
+                "Calculadora determinista. Úsala SIEMPRE que una cotización "
+                "dependa de un cálculo — multiplicar dimensiones para sacar "
+                "metros cuadrados (largo × ancho), sumar cargos adicionales, "
+                "etc. NUNCA hagas la aritmética de memoria y luego escribas "
+                "el resultado: un error de cálculo aquí cuesta dinero real. "
+                "Llámala, lee el resultado, y úsalo para decidir el rango de "
+                "precio o el total correctos."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "operacion": {
+                        "type": "string",
+                        "description": "multiplicar | sumar | restar",
+                    },
+                    "a": {"type": "number"},
+                    "b": {"type": "number"},
+                },
+                "required": ["operacion", "a", "b"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "handoff",
             "description": (
                 "Pasa la conversación a un humano del negocio y pausa la IA. Tu "
@@ -451,6 +479,8 @@ class ToolRuntime:
                 return await self._route_out()
             if name == "identificar_plaga":
                 return self._identificar_plaga(args)
+            if name == "calcular":
+                return self._calcular(args)
             if name == "handoff":
                 return self._handoff(args)
             logger.warning("tools: herramienta desconocida %r", name)
@@ -702,6 +732,27 @@ class ToolRuntime:
         tamano_color = str(args.get("tamano_color") or "")
         ubicacion = str(args.get("ubicacion") or "")
         return _clasificar_cucaracha(tamano_color, ubicacion)
+
+    def _calcular(self, args: dict[str, Any]) -> dict[str, Any]:
+        try:
+            a = float(args.get("a"))  # type: ignore[arg-type]
+            b = float(args.get("b"))  # type: ignore[arg-type]
+        except (TypeError, ValueError):
+            return {"ok": False, "error": "operandos_invalidos"}
+        operacion = str(args.get("operacion") or "").strip().lower()
+        if operacion in ("multiplicar", "multiplicacion", "×", "x", "*"):
+            resultado = a * b
+        elif operacion in ("sumar", "suma", "+"):
+            resultado = a + b
+        elif operacion in ("restar", "resta", "-"):
+            resultado = a - b
+        else:
+            return {"ok": False, "error": "operacion_no_reconocida"}
+        # Entero cuando cae exacto (p.ej. 5x10 -> 50, no 50.0) — más natural
+        # de leer para el LLM y de escribir al lead.
+        if resultado == int(resultado):
+            resultado = int(resultado)
+        return {"ok": True, "resultado": resultado}
 
     def _handoff(self, args: dict[str, Any]) -> dict[str, Any]:
         self.handoff_reason = str(args.get("reason") or "lead_request")
