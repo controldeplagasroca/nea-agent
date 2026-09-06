@@ -61,9 +61,11 @@ class FakeCalendar:
         self.availability_calls: list[dict[str, Any]] = []
         self.booking_calls: list[dict[str, Any]] = []
         self.reschedule_calls: list[dict[str, Any]] = []
+        self.cancel_calls: list[str] = []
         self.availability_queue: list[list[dict[str, Any]]] = []
         self.create_result: dict[str, Any] | Exception = {"event_id": "evt_1"}
         self.reschedule_result: dict[str, Any] | Exception = {}
+        self.cancel_exc: Exception | None = None
 
     async def get_availability(
         self, service_key: str, limit: int = 12, per_day: int = 3, days: int = 5,
@@ -115,6 +117,11 @@ class FakeCalendar:
         if isinstance(self.reschedule_result, Exception):
             raise self.reschedule_result
         return self.reschedule_result
+
+    async def cancel_booking(self, event_id: str) -> None:
+        self.cancel_calls.append(event_id)
+        if self.cancel_exc is not None:
+            raise self.cancel_exc
 
     async def aclose(self) -> None:
         return None

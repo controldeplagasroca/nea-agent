@@ -1,4 +1,5 @@
-"""Herramientas del LLM: update_ficha, propose_slots, book_session, route_out, handoff.
+"""Herramientas del LLM: update_ficha, propose_slots, book_session,
+reschedule_session, cancel_session, route_out, handoff.
 
 La validación es server-side: `book_session` SOLO acepta slots previamente
 ofrecidos (tabla offered_slots, comparación por epoch exacto). Un fallo del
@@ -275,6 +276,20 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
     {
         "type": "function",
         "function": {
+            "name": "cancel_session",
+            "description": (
+                "Cancela DEFINITIVAMENTE la cita YA agendada del lead (la borra "
+                "de la agenda). Llámala SOLO tras confirmar explícitamente que "
+                "quiere cancelar (no mover) y sobre CUÁL cita, si el lead pudiera "
+                "tener duda. Esto deja aviso interno para el dueño — no es un "
+                "handoff, la IA sigue activa para lo que el lead necesite después."
+            ),
+            "parameters": {"type": "object", "properties": {}},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "route_out",
             "description": (
                 "Marca al lead como no calificado (hoy). Después despídete con "
@@ -418,6 +433,7 @@ class ToolRuntime:
         self.booked = False
         self.routed_out = False
         self.proposed = False
+        self.canceled = False
 
     async def execute(self, name: str, args: dict[str, Any]) -> dict[str, Any]:
         try:
@@ -429,6 +445,8 @@ class ToolRuntime:
                 return await self._book_session(args)
             if name == "reschedule_session":
                 return await self._reschedule_session(args)
+            if name == "cancel_session":
+                return await self._cancel_session()
             if name == "route_out":
                 return await self._route_out()
             if name == "identificar_plaga":
@@ -636,6 +654,35 @@ class ToolRuntime:
                 "confirma que quedó movida, con el día COMPLETO y la hora tal "
                 "cual dice label"
             ),
+        }
+
+    async def _cancel_session(self) -> dict[str, Any]:
+        active = await self._ctx.store.get_active_calendar_booking(self._conv.id)
+        if active is None:
+            return {
+                "ok": False,
+                "error": "sin_cita",
+                "detalle": "el lead no tiene cita por delante que cancelar",
+            }
+        await self._ctx.calendar.cancel_booking(active.google_event_id)
+        await self._ctx.store.clear_offered_slots(self._conv.id)
+        await self._ctx.store.cancel_calendar_booking(self._conv.id)
+        self.canceled = True
+        try:
+            # No es handoff (la IA sigue activa): queda como nota en la ficha
+            # del lead para que el dueño la vea, igual que route_out.
+            await self._ctx.crm.put_ficha(
+                self._crm_conv_id,
+                {
+                    "resultado": "cancelo",
+                    "notas": "Cita cancelada por el lead vía WhatsApp.",
+                },
+            )
+        except CrmError as exc:  # best-effort: la cita ya se borró de la agenda
+            logger.warning("tools: no pude anotar la cancelación en ficha: %s", exc)
+        return {
+            "ok": True,
+            "instrucciones": "confirma al lead que la cita quedó cancelada, sin pedir motivo si ya lo dio",
         }
 
     async def _route_out(self) -> dict[str, Any]:

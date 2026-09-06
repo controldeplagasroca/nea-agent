@@ -188,3 +188,28 @@ async def test_reschedule_booking_patch(calendar, respx_mock):
     assert result == {}
     body = json.loads(patch.calls[0].request.content)
     assert body["start"]["dateTime"] == new_start.isoformat()
+
+
+async def test_cancel_booking_delete(calendar, respx_mock):
+    delete = respx_mock.delete(f"{API_BASE}/calendars/{CAL_ID}/events/evt_1").mock(
+        return_value=httpx.Response(204)
+    )
+    await calendar.cancel_booking("evt_1")
+    assert delete.calls.call_count == 1
+
+
+async def test_cancel_booking_ya_borrado_es_idempotente(calendar, respx_mock):
+    """404/410 = ya no existía (p.ej. borrado a mano en Google Calendar) — no
+    es un error que deba tumbar el turno del lead."""
+    respx_mock.delete(f"{API_BASE}/calendars/{CAL_ID}/events/evt_1").mock(
+        return_value=httpx.Response(410)
+    )
+    await calendar.cancel_booking("evt_1")  # no debe lanzar
+
+
+async def test_cancel_booking_error_real_se_propaga(calendar, respx_mock):
+    respx_mock.delete(f"{API_BASE}/calendars/{CAL_ID}/events/evt_1").mock(
+        return_value=httpx.Response(500)
+    )
+    with pytest.raises(CalendarError):
+        await calendar.cancel_booking("evt_1")

@@ -143,6 +143,9 @@ class NullCalendarClient:
     async def reschedule_booking(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
         raise CalendarError("agenda no configurada (falta GOOGLE_SERVICE_ACCOUNT_JSON/GOOGLE_CALENDAR_ID)")
 
+    async def cancel_booking(self, *args: Any, **kwargs: Any) -> None:
+        raise CalendarError("agenda no configurada (falta GOOGLE_SERVICE_ACCOUNT_JSON/GOOGLE_CALENDAR_ID)")
+
     async def aclose(self) -> None:
         return None
 
@@ -319,6 +322,15 @@ class GoogleCalendarClient:
         if resp.status_code != 200:
             raise CalendarError(f"events.patch devolvió {resp.status_code}")
         return {}
+
+    async def cancel_booking(self, event_id: str) -> None:
+        resp = await self._request(
+            "DELETE", f"/calendars/{self._calendar_id}/events/{event_id}"
+        )
+        # 204 = borrado; 404/410 = ya no existía (idempotente, no es error del
+        # lead ni del negocio — puede haberse borrado a mano en Google Calendar).
+        if resp.status_code not in (204, 404, 410):
+            raise CalendarError(f"events.delete devolvió {resp.status_code}")
 
     def _event_body(
         self, start: datetime, end: datetime, summary: str, description: str

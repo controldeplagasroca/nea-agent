@@ -5,7 +5,8 @@ import asyncio
 import json
 
 from app.llm import LlmExhausted, LlmReply, ToolCall
-from tests.conftest import FakeLLM, mock_crm_basics, wa_body
+from app.state import utcnow
+from tests.conftest import IDENTITY, FakeLLM, mock_crm_basics, wa_body
 
 
 async def test_handoff_despedida_primero_pausa_despues(ctx, client, respx_mock):
@@ -72,6 +73,34 @@ async def test_turno_con_route_out_cierra_sin_seguimiento(ctx, client, respx_moc
     conv = next(iter(ctx.store.conversations.values()))
     assert conv.phase == "cerrada"
     assert conv.followup_due_at is None
+
+
+async def test_cancel_session_cierra_sin_handoff_ni_seguimiento(ctx, client, respx_mock):
+    """Cancelar deja la conversación cerrada (como book/route_out) pero SIN
+    pasar por handoff.reason — antes esto pausaba la IA innecesariamente."""
+    routes = mock_crm_basics(respx_mock)
+    conv = await ctx.store.get_or_create_conversation(IDENTITY)
+    await ctx.store.save_calendar_booking(
+        conv.id, "evt_1", "alemana", utcnow(), utcnow()
+    )
+    ctx.llm.replies = [
+        LlmReply(
+            content=None,
+            tool_calls=[ToolCall(id="tc1", name="cancel_session", arguments={})],
+        ),
+        LlmReply(content="Listo, tu cita quedó cancelada. Cualquier cosa aquí estoy."),
+    ]
+    await client.post(
+        "/webhook", content=wa_body(text="quiero cancelar mi cita, no estaré")
+    )
+    await asyncio.sleep(0.25)
+
+    assert routes["messages"].call_count == 1
+    assert routes["handoff"].call_count == 0  # NO es handoff
+    assert ctx.calendar.cancel_calls == ["evt_1"]
+    conv_after = next(iter(ctx.store.conversations.values()))
+    assert conv_after.phase == "cerrada"
+    assert conv_after.followup_due_at is None
 
 
 async def test_los_turnos_de_una_conversacion_no_se_encinan(ctx, client, respx_mock):

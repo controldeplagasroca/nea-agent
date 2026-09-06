@@ -187,6 +187,7 @@ class Store(Protocol):
     async def update_calendar_booking_time(
         self, conversation_id: int, start_utc: datetime, end_utc: datetime
     ) -> None: ...
+    async def cancel_calendar_booking(self, conversation_id: int) -> None: ...
 
     # cola de envíos pendientes (respuestas que no pudieron salir en el turno)
     async def enqueue_pending_send(
@@ -354,6 +355,9 @@ class MemoryStore:
         if booking is not None:
             booking.start_utc = start_utc
             booking.end_utc = end_utc
+
+    async def cancel_calendar_booking(self, conversation_id: int) -> None:
+        self.calendar_bookings.pop(conversation_id, None)
 
     async def enqueue_pending_send(
         self, conversation_id: int, crm_conversation_id: str, content: str

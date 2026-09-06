@@ -57,8 +57,9 @@ Meta Cloud API ── webhook ──► Nea (este repo)
 ```
 
 Herramientas del LLM: `update_ficha` (calificación), `propose_slots` /
-`book_session` (agenda), `route_out` (no califica; comparte los recursos
-alternativos del perfil), `handoff` (pausa la IA en el CRM).
+`book_session` / `reschedule_session` / `cancel_session` (agenda — cancelar no
+pausa la IA, solo deja aviso interno), `route_out` (no califica; comparte los
+recursos alternativos del perfil), `handoff` (pausa la IA en el CRM).
 
 ## Quickstart
 

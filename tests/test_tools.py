@@ -253,6 +253,35 @@ async def test_reschedule_sin_cita_manda_a_book(runtime_y_ctx):
     assert ctx.calendar.reschedule_calls == []
 
 
+async def test_cancel_borra_la_cita_y_no_es_handoff(runtime_y_ctx, respx_mock):
+    """Antes esto era handoff obligado; ahora Nea cancela y solo deja aviso."""
+    runtime, ctx, conv = runtime_y_ctx
+    start = SLOT_DT - timedelta(days=7)
+    end = start + timedelta(minutes=90)
+    await ctx.store.save_calendar_booking(conv.id, "evt_old", "alemana", start, end)
+    ficha_route = respx_mock.put(f"{CRM_URL}/api/bot/ficha").mock(
+        return_value=httpx.Response(200, json={"ficha": {}, "stageMoved": False})
+    )
+
+    result = await runtime.execute("cancel_session", {})
+
+    assert result["ok"] is True
+    assert runtime.canceled is True
+    assert runtime.handoff_reason is None  # cancelar NO dispara handoff
+    assert ctx.calendar.cancel_calls == ["evt_old"]
+    assert await ctx.store.get_active_calendar_booking(conv.id) is None
+    body = json.loads(ficha_route.calls[0].request.content)
+    assert body["ficha"]["resultado"] == "cancelo"
+
+
+async def test_cancel_sin_cita_no_llega_a_la_agenda(runtime_y_ctx):
+    runtime, ctx, conv = runtime_y_ctx
+    result = await runtime.execute("cancel_session", {})
+    assert result["ok"] is False
+    assert result["error"] == "sin_cita"
+    assert ctx.calendar.cancel_calls == []
+
+
 async def test_identificar_plaga_alemana_por_cocina(runtime_y_ctx):
     runtime, ctx, conv = runtime_y_ctx
     result = await runtime.execute(

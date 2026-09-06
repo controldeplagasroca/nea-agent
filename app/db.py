@@ -347,6 +347,15 @@ class PgStore:
             end_utc,
         )
 
+    async def cancel_calendar_booking(self, conversation_id: int) -> None:
+        await self.pool.execute(
+            """
+            UPDATE calendar_bookings SET canceled_at = now()
+            WHERE conversation_id = $1 AND canceled_at IS NULL
+            """,
+            conversation_id,
+        )
+
     # ------------------------------------------------- envíos pendientes ---
 
     async def enqueue_pending_send(

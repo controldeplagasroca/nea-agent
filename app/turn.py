@@ -276,7 +276,12 @@ async def run_turn(
         updates["stalled_at"] = utcnow()
         updates["phase"] = "cerrada"
         updates["followup_due_at"] = None
-    elif runtime.handoff_reason is not None or runtime.booked or runtime.routed_out:
+    elif (
+        runtime.handoff_reason is not None
+        or runtime.booked
+        or runtime.routed_out
+        or runtime.canceled
+    ):
         updates["phase"] = "cerrada"
         updates["followup_due_at"] = None
     else:
