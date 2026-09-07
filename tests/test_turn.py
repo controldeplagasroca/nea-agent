@@ -3,10 +3,11 @@ from __future__ import annotations
 
 import asyncio
 import json
+from datetime import datetime, timezone
 
 from app.llm import LlmExhausted, LlmReply, ToolCall
-from app.state import utcnow
-from app.turn import VERIFICAR_COBERTURA_CHOICE
+from app.state import OfferedSlot, utcnow
+from app.turn import BOOK_SESSION_CHOICE, VERIFICAR_COBERTURA_CHOICE
 from tests.conftest import IDENTITY, FakeLLM, mock_crm_basics, wa_body
 
 
@@ -175,6 +176,64 @@ async def test_no_forzar_verificar_cobertura_sin_mencion_de_ubicacion(ctx, clien
     routes = mock_crm_basics(respx_mock)
     ctx.llm.replies = [LlmReply(content="¡Hola! ¿Qué plaga tienes?")]
     await client.post("/webhook", content=wa_body(text="Hola, buenas tardes"))
+    await asyncio.sleep(0.25)
+
+    assert routes["messages"].call_count == 1
+    assert ctx.llm.calls[0]["tool_choice"] is None
+
+
+async def test_forzar_book_session_si_hay_slots_ofrecidos_y_lead_confirma(
+    ctx, client, respx_mock
+):
+    """Regresión (2026-09-07): tras el lead confirmar un horario ya
+    ofrecido, el modelo respondió "Tu cita queda agendada..." en puro texto
+    SIN llamar book_session ni una sola vez -- una alucinación de que la
+    acción ya ocurrió cuando nunca se ejecutó (0 requests a Google Calendar
+    ese turno). Si hay slots ofrecidos y el mensaje suena a confirmación, la
+    ronda 0 debe forzar book_session."""
+    mock_crm_basics(respx_mock)
+    conv = await ctx.store.get_or_create_conversation(IDENTITY)
+    await ctx.store.replace_offered_slots(
+        conv.id,
+        [
+            OfferedSlot(
+                conversation_id=conv.id,
+                start_utc=datetime(2026, 7, 20, 16, 0, tzinfo=timezone.utc),
+                end_utc=datetime(2026, 7, 20, 17, 30, tzinfo=timezone.utc),
+                label="lunes 20 de julio, 10:00 am",
+                service_key="alemana",
+            )
+        ],
+    )
+    ctx.llm.replies = [
+        LlmReply(
+            content=None,
+            tool_calls=[
+                ToolCall(
+                    id="tc1",
+                    name="book_session",
+                    arguments={
+                        "start_utc": "2026-07-20T16:00:00Z",
+                        "dia_confirmado": "martes a las 11",
+                        "direccion_completa": "",
+                    },
+                )
+            ],
+        ),
+        LlmReply(content="¿Me compartes la dirección completa para el técnico?"),
+    ]
+    await client.post("/webhook", content=wa_body(text="martes a las 11"))
+    await asyncio.sleep(0.25)
+
+    assert ctx.llm.calls[0]["tool_choice"] == BOOK_SESSION_CHOICE
+    assert ctx.llm.calls[1]["tool_choice"] is None
+
+
+async def test_no_forzar_book_session_sin_slots_ofrecidos(ctx, client, respx_mock):
+    routes = mock_crm_basics(respx_mock)
+    ctx.llm.replies = [LlmReply(content="¡Hola! ¿Qué plaga tienes?")]
+    # "sí" suena a confirmación, pero sin slots ofrecidos no hay nada que reservar
+    await client.post("/webhook", content=wa_body(text="si"))
     await asyncio.sleep(0.25)
 
     assert routes["messages"].call_count == 1

@@ -119,6 +119,32 @@ _UBICACION_PALABRAS = (
 _CP_RE = re.compile(r"\b\d{5}\b")
 
 
+_CONFIRMACION_PALABRAS = (
+    "si", "sí", "va", "sale", "ese", "esa", "correcto", "confirmo",
+    "adelante", "esta bien", "está bien", "dale", "perfecto", "de acuerdo",
+)
+_HORA_RE = re.compile(r"\b\d{1,2}(:\d{2})?\s*(am|pm|hrs?|horas)?\b")
+
+
+def parece_confirmar_horario(texto: str) -> bool:
+    """Heurística server-side: ¿el mensaje del lead suena a que está
+    aceptando/eligiendo un horario ya ofrecido?
+
+    Se usa en turn.py para FORZAR la tool-call de book_session (en vez de
+    "auto") cuando además hay slots ofrecidos pendientes en la conversación.
+    En vivo (2026-09-07) el modelo, tras el lead confirmar un horario,
+    respondió "Tu cita queda agendada..." en puro texto SIN llamar
+    book_session ni una sola vez (0 requests a la API de Google Calendar en
+    ese turno) -- una alucinación de que la acción ya ocurrió cuando nunca
+    se ejecutó. Mismo patrón que verificar_cobertura: con tool_choice="auto"
+    el modelo puede simplemente no llamar la tool.
+    """
+    t = _sin_acentos(texto.lower())
+    if any(p in t for p in _CONFIRMACION_PALABRAS):
+        return True
+    return bool(_HORA_RE.search(t))
+
+
 def _direccion_incompleta(direccion: str) -> bool:
     """Heurística server-side: ¿tiene pinta de dirección real (calle+número)?
 

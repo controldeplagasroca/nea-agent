@@ -23,7 +23,12 @@ from app.stall import ALERTA as STALL_ALERT, racha_vacia, sin_rumbo
 from app.profile import resolve_profile
 from app.prompt import build_system_prompt
 from app.state import AppContext, InboundMessage, utcnow
-from app.tools import TOOL_SCHEMAS, ToolRuntime, requiere_verificar_cobertura
+from app.tools import (
+    TOOL_SCHEMAS,
+    ToolRuntime,
+    parece_confirmar_horario,
+    requiere_verificar_cobertura,
+)
 
 logger = logging.getLogger("nea.turn")
 
@@ -238,7 +243,9 @@ async def run_turn(
     # --- LLM con tools ----------------------------------------------------
     runtime = ToolRuntime(ctx, conv, str(crm_conv_id), profile=profile)
     try:
-        final_text = await _tool_loop(ctx, messages, runtime, lead_text=user_text)
+        final_text = await _tool_loop(
+            ctx, messages, runtime, lead_text=user_text, offered=offered
+        )
     except LlmExhausted as exc:
         logger.error(
             "turno %s: LLM agotó reintentos (%s) — silencio + handoff error",
@@ -341,6 +348,10 @@ VERIFICAR_COBERTURA_CHOICE = {
     "type": "function",
     "function": {"name": "verificar_cobertura"},
 }
+BOOK_SESSION_CHOICE = {
+    "type": "function",
+    "function": {"name": "book_session"},
+}
 
 
 async def _tool_loop(
@@ -348,6 +359,7 @@ async def _tool_loop(
     messages: list[dict[str, Any]],
     runtime: ToolRuntime,
     lead_text: str = "",
+    offered: list[Any] | None = None,
 ) -> str | None:
     """Rondas de tool-calling hasta obtener texto final (o rendirse).
 
@@ -355,12 +367,29 @@ async def _tool_loop(
     tool-call de verificar_cobertura (tool_choice específico) en vez de
     dejarlo en "auto" -- en vivo (2026-09-06) el modelo respondió "está en
     zona de cobertura" tres veces seguidas sin llamarla ni una vez, con
-    tool_choice="auto", aunque el chasis se lo exigía en prosa. Rondas
-    siguientes vuelven a "auto" para no atorar el resto del turno.
+    tool_choice="auto", aunque el chasis se lo exigía en prosa.
+
+    Si en cambio hay slots YA ofrecidos y el lead parece estar aceptando uno,
+    forzamos book_session -- en vivo (2026-09-07) el modelo respondió "Tu
+    cita queda agendada..." en puro texto SIN llamar book_session ni una
+    sola vez (0 requests a Google Calendar ese turno): una alucinación de
+    que la acción ya ocurrió. book_session ya valida server-side el slot y
+    la dirección completa, así que forzarla es seguro -- si el lead no
+    confirmó nada real, simplemente regresa un error claro que el modelo lee
+    y usa para preguntar bien en su respuesta.
+
+    Rondas siguientes vuelven a "auto" para no atorar el resto del turno.
     """
     forzar_cobertura = requiere_verificar_cobertura(lead_text)
+    forzar_book = bool(offered) and parece_confirmar_horario(lead_text)
+    if forzar_cobertura:
+        forzado = VERIFICAR_COBERTURA_CHOICE
+    elif forzar_book:
+        forzado = BOOK_SESSION_CHOICE
+    else:
+        forzado = None
     for ronda in range(MAX_TOOL_ROUNDS):
-        tool_choice = VERIFICAR_COBERTURA_CHOICE if (ronda == 0 and forzar_cobertura) else None
+        tool_choice = forzado if ronda == 0 else None
         reply = await ctx.llm.complete(messages, tools=TOOL_SCHEMAS, tool_choice=tool_choice)
         if not reply.tool_calls:
             return reply.content  # turno de puro texto
