@@ -423,6 +423,15 @@ class PgStore:
         )
         return [_pending_from_row(r) for r in rows]
 
+    async def list_pending_bookings_for_conversation(
+        self, conversation_id: int
+    ) -> list[PendingBooking]:
+        rows = await self.pool.fetch(
+            "SELECT * FROM pending_bookings WHERE conversation_id = $1 ORDER BY id",
+            conversation_id,
+        )
+        return [_pending_from_row(r) for r in rows]
+
     async def due_booking_reminders(self, now: datetime) -> list[PendingBooking]:
         rows = await self.pool.fetch(
             """

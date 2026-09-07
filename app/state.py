@@ -226,6 +226,12 @@ class Store(Protocol):
     ) -> PendingBooking: ...
     async def get_pending_booking(self, pending_id: int) -> PendingBooking | None: ...
     async def list_pending_bookings_pendientes(self) -> list[PendingBooking]: ...
+    async def list_pending_bookings_for_conversation(
+        self, conversation_id: int
+    ) -> list[PendingBooking]:
+        """Todas (cualquier estado) — para detectar reutilización de la
+        dirección de OTRO domicilio mencionado antes en la misma conversación."""
+        ...
     async def due_booking_reminders(self, now: datetime) -> list[PendingBooking]: ...
     async def mark_booking_reminder_sent(
         self, pending_id: int, next_reminder_at: datetime
@@ -439,6 +445,14 @@ class MemoryStore:
     async def list_pending_bookings_pendientes(self) -> list[PendingBooking]:
         return sorted(
             (p for p in self.pending_bookings.values() if p.estado == "pendiente"),
+            key=lambda p: p.id,
+        )
+
+    async def list_pending_bookings_for_conversation(
+        self, conversation_id: int
+    ) -> list[PendingBooking]:
+        return sorted(
+            (p for p in self.pending_bookings.values() if p.conversation_id == conversation_id),
             key=lambda p: p.id,
         )
 

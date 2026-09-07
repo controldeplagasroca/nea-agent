@@ -162,6 +162,36 @@ def _direccion_incompleta(direccion: str) -> bool:
     return not any(ch.isdigit() for ch in d)
 
 
+_DIGITOS_RE = re.compile(r"\d{2,}")
+
+
+def _direccion_reciclada_de_otro_domicilio(
+    direccion: str, direcciones_previas: list[str], texto_lead_reciente: str
+) -> bool:
+    """¿Esta dirección coincide con la de OTRA cita YA registrada en esta
+    misma conversación, sin que el lead la haya vuelto a escribir en sus
+    mensajes recientes? Señal de que se reutilizó el domicilio de una cita
+    ANTERIOR mencionada antes en la misma conversación (ej. lead que dice
+    "tengo otro domicilio..." y el modelo recicla la dirección vieja en vez
+    de pedir la nueva).
+
+    En vivo (2026-09-07) esto pasó exactamente así: el lead dio "Calle
+    Amores 123" para un domicilio, más tarde mencionó un domicilio distinto
+    dando solo el código postal (nunca la calle), y book_session igual
+    reutilizó "Calle Amores 123" -- viejo, de la cita anterior.
+    """
+    digitos_nuevos = set(_DIGITOS_RE.findall(direccion))
+    if not digitos_nuevos:
+        return False
+    digitos_previos: set[str] = set()
+    for previa in direcciones_previas:
+        digitos_previos |= set(_DIGITOS_RE.findall(previa))
+    if not (digitos_nuevos & digitos_previos):
+        return False  # no coincide con ninguna dirección anterior -- ok
+    texto = _sin_acentos(texto_lead_reciente.lower())
+    return not any(d in texto for d in digitos_nuevos)
+
+
 def requiere_verificar_cobertura(texto: str) -> bool:
     """Heurística server-side: ¿el mensaje del lead menciona su ubicación?
 
@@ -795,6 +825,28 @@ class ToolRuntime:
                     "book_session cuando la tengas completa."
                 ),
             }
+        previas = await self._ctx.store.list_pending_bookings_for_conversation(self._conv.id)
+        if previas:
+            historial = await self._ctx.store.recent_messages(self._conv.id, 15)
+            texto_lead_reciente = " ".join(
+                m.content for m in historial if m.role == "user"
+            )
+            if _direccion_reciclada_de_otro_domicilio(
+                direccion, [p.direccion for p in previas], texto_lead_reciente
+            ):
+                return {
+                    "ok": False,
+                    "error": "direccion_repetida_sin_confirmar",
+                    "detalle": (
+                        "Esta dirección ya se usó para OTRA cita de esta misma "
+                        "conversación (probablemente un domicilio distinto que "
+                        "el lead mencionó antes) y no la volvió a escribir "
+                        "recientemente. NO asumas que es la misma: pregúntale "
+                        "de nuevo la dirección completa de ESTE domicilio "
+                        "específico (calle, número exterior, número interior "
+                        "si aplica, colonia, alcaldía) antes de reintentar."
+                    ),
+                }
         chosen, error = await self._resolve_offered(args, "book_session")
         if error is not None or chosen is None:
             return error or {"ok": False, "error": "slot_no_ofrecido"}

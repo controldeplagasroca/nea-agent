@@ -195,6 +195,94 @@ async def test_book_con_dueno_no_reserva_directo_crea_pendiente(
     assert await ctx.store.get_offered_slots(conv.id) == []
 
 
+async def test_book_rechaza_direccion_reciclada_de_otro_domicilio(
+    runtime_con_dueno_ctx, respx_mock
+):
+    """Regresión (2026-09-07): en vivo, el lead dio "Calle Amores 123" para
+    un domicilio, luego mencionó un domicilio DISTINTO dando solo el código
+    postal (nunca la calle) -- y book_session igual reutilizó "Calle Amores
+    123", la dirección vieja de la cita anterior de esa misma conversación."""
+    runtime, ctx, conv = runtime_con_dueno_ctx
+    await ctx.store.create_pending_booking(
+        conv.id, CRM_CONV_ID, "hormiga", SLOT_DT, SLOT_END_DT,
+        "lunes 20 de julio, 10:00 am", DIRECCION_OK, "lunes a las 10", SLOT_DT,
+    )
+    # el lead NO volvió a escribir esa dirección en sus mensajes recientes
+    result = await runtime.execute(
+        "book_session",
+        {
+            "start_utc": SLOT_ISO,
+            "dia_confirmado": "lunes a las 10",
+            "direccion_completa": DIRECCION_OK,
+        },
+    )
+    assert result["ok"] is False
+    assert result["error"] == "direccion_repetida_sin_confirmar"
+    assert ctx.calendar.booking_calls == []
+    assert (await ctx.store.list_pending_bookings_pendientes())[0].direccion == DIRECCION_OK
+    # no se creó una SEGUNDA pending_booking para el intento rechazado
+    assert len(await ctx.store.list_pending_bookings_for_conversation(conv.id)) == 1
+
+
+async def test_book_acepta_direccion_repetida_si_el_lead_la_reescribio(
+    runtime_con_dueno_ctx, respx_mock
+):
+    """Si el lead SÍ volvió a escribir la misma dirección recientemente
+    (ej. dos domicilios que casualmente comparten calle y número), no debe
+    rechazarse -- el candado es contra la REUTILIZACIÓN silenciosa, no
+    contra coincidencias reales confirmadas por el lead."""
+    runtime, ctx, conv = runtime_con_dueno_ctx
+    await ctx.store.create_pending_booking(
+        conv.id, CRM_CONV_ID, "hormiga", SLOT_DT, SLOT_END_DT,
+        "lunes 20 de julio, 10:00 am", DIRECCION_OK, "lunes a las 10", SLOT_DT,
+    )
+    await ctx.store.add_message(conv.id, "user", f"Sí, es en {DIRECCION_OK} otra vez")
+    respx_mock.get(f"{CRM_URL}/api/bot/context", params={"waIdentity": OWNER_ID}).mock(
+        return_value=httpx.Response(200, json=crm_context(conv_id="cv_owner"))
+    )
+    respx_mock.post(f"{CRM_URL}/api/bot/messages").mock(
+        return_value=httpx.Response(200, json={"messageId": "msg_1"})
+    )
+    result = await runtime.execute(
+        "book_session",
+        {
+            "start_utc": SLOT_ISO,
+            "dia_confirmado": "lunes a las 10",
+            "direccion_completa": DIRECCION_OK,
+        },
+    )
+    assert result["ok"] is True
+    assert result["pendiente_aprobacion"] is True
+
+
+async def test_book_direccion_nueva_sin_coincidencia_no_se_rechaza(
+    runtime_con_dueno_ctx, respx_mock
+):
+    """Una dirección previa en la conversación no bloquea una dirección
+    NUEVA y distinta -- el candado solo activa cuando coinciden los números."""
+    runtime, ctx, conv = runtime_con_dueno_ctx
+    await ctx.store.create_pending_booking(
+        conv.id, CRM_CONV_ID, "hormiga", SLOT_DT, SLOT_END_DT,
+        "lunes 20 de julio, 10:00 am", DIRECCION_OK, "lunes a las 10", SLOT_DT,
+    )
+    respx_mock.get(f"{CRM_URL}/api/bot/context", params={"waIdentity": OWNER_ID}).mock(
+        return_value=httpx.Response(200, json=crm_context(conv_id="cv_owner"))
+    )
+    respx_mock.post(f"{CRM_URL}/api/bot/messages").mock(
+        return_value=httpx.Response(200, json={"messageId": "msg_1"})
+    )
+    result = await runtime.execute(
+        "book_session",
+        {
+            "start_utc": SLOT_ISO,
+            "dia_confirmado": "lunes a las 10",
+            "direccion_completa": "Calle Reforma 789, colonia Nápoles",
+        },
+    )
+    assert result["ok"] is True
+    assert result["pendiente_aprobacion"] is True
+
+
 async def test_book_rechaza_direccion_sin_numero(runtime_y_ctx):
     """Colonia+alcaldía sola (sin calle/número) no es una dirección real para
     que el técnico llegue -- debe seguir pidiéndose calle y número."""
