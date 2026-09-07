@@ -10,6 +10,7 @@ turno.
 from __future__ import annotations
 
 import logging
+import re
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -105,6 +106,29 @@ def _evaluar_cobertura(
         "cobertura": "dentro_de_zona",
         "instrucciones": "Ya puedes confirmar cobertura y seguir el flujo normal.",
     }
+
+
+_UBICACION_PALABRAS = (
+    "colonia", "alcaldia", "delegacion", "municipio", "codigo postal",
+    "cod postal", "c.p.",
+)
+_CP_RE = re.compile(r"\b\d{5}\b")
+
+
+def requiere_verificar_cobertura(texto: str) -> bool:
+    """Heurística server-side: ¿el mensaje del lead menciona su ubicación?
+
+    Se usa en turn.py para FORZAR la tool-call de verificar_cobertura
+    (tool_choice específico) en vez de confiar en que el LLM decida llamarla
+    por su cuenta. En vivo (2026-09-06), con tool_choice="auto", el modelo
+    respondió "está en zona de cobertura" tres veces seguidas SIN llamar la
+    tool ni una sola vez, aunque estaba disponible y el chasis la exigía en
+    prosa ("SIEMPRE llámala antes de decir cualquier cosa sobre cobertura").
+    """
+    t = _sin_acentos(texto.lower())
+    if any(p in t for p in _UBICACION_PALABRAS):
+        return True
+    return bool(_CP_RE.search(t))
 
 
 def _clasificar_cucaracha(tamano_color: str, ubicacion: str) -> dict[str, Any]:

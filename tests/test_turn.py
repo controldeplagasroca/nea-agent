@@ -6,6 +6,7 @@ import json
 
 from app.llm import LlmExhausted, LlmReply, ToolCall
 from app.state import utcnow
+from app.turn import VERIFICAR_COBERTURA_CHOICE
 from tests.conftest import IDENTITY, FakeLLM, mock_crm_basics, wa_body
 
 
@@ -113,9 +114,9 @@ async def test_los_turnos_de_una_conversacion_no_se_encinan(ctx, client, respx_m
     routes = mock_crm_basics(respx_mock)
 
     class LlmLento(FakeLLM):
-        async def complete(self, messages, tools=None):
+        async def complete(self, messages, tools=None, tool_choice=None):
             await asyncio.sleep(0.3)
-            return await super().complete(messages, tools)
+            return await super().complete(messages, tools, tool_choice)
 
     ctx.llm = LlmLento()
 
@@ -136,3 +137,45 @@ async def test_los_turnos_de_una_conversacion_no_se_encinan(ctx, client, respx_m
     assert rutas.index("/api/bot/messages") < rutas.index(
         "/api/bot/context", rutas.index("/api/bot/context") + 1
     )
+
+
+async def test_forzar_verificar_cobertura_si_lead_menciona_colonia(ctx, client, respx_mock):
+    """Regresión (2026-09-06): con tool_choice="auto" el LLM respondió "está
+    en zona de cobertura" tres veces seguidas SIN llamar verificar_cobertura
+    ni una sola vez, aunque la tool estaba disponible y el chasis la exigía
+    en prosa. La ronda 0 del turno debe forzarla cuando el lead menciona su
+    colonia/ubicación -- no basta con confiar en que el modelo la use solo."""
+    mock_crm_basics(respx_mock)
+    ctx.llm.replies = [
+        LlmReply(
+            content=None,
+            tool_calls=[
+                ToolCall(
+                    id="tc1",
+                    name="verificar_cobertura",
+                    arguments={
+                        "colonia": "Buenos Aires",
+                        "alcaldia_municipio": "",
+                        "codigo_postal": "",
+                    },
+                )
+            ],
+        ),
+        LlmReply(content="¿Me compartes tu código postal para confirmar cobertura?"),
+    ]
+    await client.post("/webhook", content=wa_body(text="Vivo en la Colonia Buenos Aires"))
+    await asyncio.sleep(0.25)
+
+    assert ctx.llm.calls[0]["tool_choice"] == VERIFICAR_COBERTURA_CHOICE
+    # ronda 1 (tras ejecutar la tool) vuelve a "auto": no atora el resto del turno
+    assert ctx.llm.calls[1]["tool_choice"] is None
+
+
+async def test_no_forzar_verificar_cobertura_sin_mencion_de_ubicacion(ctx, client, respx_mock):
+    routes = mock_crm_basics(respx_mock)
+    ctx.llm.replies = [LlmReply(content="¡Hola! ¿Qué plaga tienes?")]
+    await client.post("/webhook", content=wa_body(text="Hola, buenas tardes"))
+    await asyncio.sleep(0.25)
+
+    assert routes["messages"].call_count == 1
+    assert ctx.llm.calls[0]["tool_choice"] is None

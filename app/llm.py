@@ -42,6 +42,7 @@ class Llm(Protocol):
         self,
         messages: list[dict[str, Any]],
         tools: list[dict[str, Any]] | None = None,
+        tool_choice: dict[str, Any] | str | None = None,
     ) -> LlmReply: ...
 
     async def transcribe(
@@ -99,6 +100,7 @@ class OpenAiLlm:
         self,
         messages: list[dict[str, Any]],
         tools: list[dict[str, Any]] | None = None,
+        tool_choice: dict[str, Any] | str | None = None,
     ) -> LlmReply:
         last_error: Exception | None = None
         for attempt in range(self.RETRIES + 1):
@@ -106,7 +108,7 @@ class OpenAiLlm:
                 kwargs: dict[str, Any] = {}
                 if tools:
                     kwargs["tools"] = tools
-                    kwargs["tool_choice"] = "auto"
+                    kwargs["tool_choice"] = tool_choice or "auto"
                 resp = await self._client.chat.completions.create(
                     model=self._model, messages=messages, **kwargs
                 )

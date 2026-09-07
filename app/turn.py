@@ -23,7 +23,7 @@ from app.stall import ALERTA as STALL_ALERT, racha_vacia, sin_rumbo
 from app.profile import resolve_profile
 from app.prompt import build_system_prompt
 from app.state import AppContext, InboundMessage, utcnow
-from app.tools import TOOL_SCHEMAS, ToolRuntime
+from app.tools import TOOL_SCHEMAS, ToolRuntime, requiere_verificar_cobertura
 
 logger = logging.getLogger("nea.turn")
 
@@ -238,7 +238,7 @@ async def run_turn(
     # --- LLM con tools ----------------------------------------------------
     runtime = ToolRuntime(ctx, conv, str(crm_conv_id), profile=profile)
     try:
-        final_text = await _tool_loop(ctx, messages, runtime)
+        final_text = await _tool_loop(ctx, messages, runtime, lead_text=user_text)
     except LlmExhausted as exc:
         logger.error(
             "turno %s: LLM agotó reintentos (%s) — silencio + handoff error",
@@ -337,12 +337,31 @@ async def _fetch_context(ctx: AppContext, identity: str) -> dict[str, Any] | Non
     return None
 
 
+VERIFICAR_COBERTURA_CHOICE = {
+    "type": "function",
+    "function": {"name": "verificar_cobertura"},
+}
+
+
 async def _tool_loop(
-    ctx: AppContext, messages: list[dict[str, Any]], runtime: ToolRuntime
+    ctx: AppContext,
+    messages: list[dict[str, Any]],
+    runtime: ToolRuntime,
+    lead_text: str = "",
 ) -> str | None:
-    """Rondas de tool-calling hasta obtener texto final (o rendirse)."""
-    for _ in range(MAX_TOOL_ROUNDS):
-        reply = await ctx.llm.complete(messages, tools=TOOL_SCHEMAS)
+    """Rondas de tool-calling hasta obtener texto final (o rendirse).
+
+    Ronda 0: si el lead mencionó su ubicación en este turno, FORZAMOS la
+    tool-call de verificar_cobertura (tool_choice específico) en vez de
+    dejarlo en "auto" -- en vivo (2026-09-06) el modelo respondió "está en
+    zona de cobertura" tres veces seguidas sin llamarla ni una vez, con
+    tool_choice="auto", aunque el chasis se lo exigía en prosa. Rondas
+    siguientes vuelven a "auto" para no atorar el resto del turno.
+    """
+    forzar_cobertura = requiere_verificar_cobertura(lead_text)
+    for ronda in range(MAX_TOOL_ROUNDS):
+        tool_choice = VERIFICAR_COBERTURA_CHOICE if (ronda == 0 and forzar_cobertura) else None
+        reply = await ctx.llm.complete(messages, tools=TOOL_SCHEMAS, tool_choice=tool_choice)
         if not reply.tool_calls:
             return reply.content  # turno de puro texto
         # content vacío con tool_calls es normal (turno solo-herramientas)

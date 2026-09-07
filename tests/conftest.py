@@ -34,8 +34,9 @@ class FakeLLM:
         self,
         messages: list[dict[str, Any]],
         tools: list[dict[str, Any]] | None = None,
+        tool_choice: dict[str, Any] | str | None = None,
     ) -> LlmReply:
-        self.calls.append({"messages": messages, "tools": tools})
+        self.calls.append({"messages": messages, "tools": tools, "tool_choice": tool_choice})
         if self.raise_exc is not None:
             raise self.raise_exc
         if self.replies:
