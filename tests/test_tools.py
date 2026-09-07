@@ -375,3 +375,67 @@ async def test_identificar_plaga_solo_ubicacion_no_concluye(runtime_y_ctx):
     assert result["ok"] is True
     assert result["especie"] != "alemana"
     assert result["especie"] != "americana"
+
+
+async def test_verificar_cobertura_colonia_sola_pide_mas_datos(runtime_y_ctx):
+    """Regresión (2026-09-06): el lead dijo "Colonia Buenos Aires" (existe
+    tanto en zona cubierta como pegada a Tepito) y el bot respondió "está en
+    nuestra zona de cobertura" sin más -- dos veces seguidas en vivo, incluso
+    con la regla escrita en prosa en el perfil del negocio."""
+    runtime, ctx, conv = runtime_y_ctx
+    result = await runtime.execute(
+        "verificar_cobertura",
+        {"colonia": "Buenos Aires", "alcaldia_municipio": "", "codigo_postal": ""},
+    )
+    assert result["ok"] is True
+    assert result["cobertura"] == "requiere_mas_datos"
+
+
+async def test_verificar_cobertura_con_codigo_postal_alcanza(runtime_y_ctx):
+    runtime, ctx, conv = runtime_y_ctx
+    result = await runtime.execute(
+        "verificar_cobertura",
+        {"colonia": "Buenos Aires", "alcaldia_municipio": "", "codigo_postal": "06350"},
+    )
+    assert result["ok"] is True
+    assert result["cobertura"] == "dentro_de_zona"
+
+
+async def test_verificar_cobertura_con_alcaldia_clara_alcanza(runtime_y_ctx):
+    runtime, ctx, conv = runtime_y_ctx
+    result = await runtime.execute(
+        "verificar_cobertura",
+        {"colonia": "Nápoles", "alcaldia_municipio": "Benito Juárez", "codigo_postal": ""},
+    )
+    assert result["ok"] is True
+    assert result["cobertura"] == "dentro_de_zona"
+
+
+async def test_verificar_cobertura_tepito_fuera_de_zona(runtime_y_ctx):
+    runtime, ctx, conv = runtime_y_ctx
+    result = await runtime.execute(
+        "verificar_cobertura",
+        {"colonia": "Centro", "alcaldia_municipio": "Tepito", "codigo_postal": ""},
+    )
+    assert result["ok"] is True
+    assert result["cobertura"] == "fuera_de_zona"
+
+
+async def test_verificar_cobertura_ecatepec_fuera_de_zona(runtime_y_ctx):
+    runtime, ctx, conv = runtime_y_ctx
+    result = await runtime.execute(
+        "verificar_cobertura",
+        {"colonia": "Buenos Aires", "alcaldia_municipio": "Ecatepec", "codigo_postal": ""},
+    )
+    assert result["ok"] is True
+    assert result["cobertura"] == "fuera_de_zona"
+
+
+async def test_verificar_cobertura_gustavo_a_madero_fuera_de_zona(runtime_y_ctx):
+    runtime, ctx, conv = runtime_y_ctx
+    result = await runtime.execute(
+        "verificar_cobertura",
+        {"colonia": "Centro", "alcaldia_municipio": "Gustavo A. Madero", "codigo_postal": ""},
+    )
+    assert result["ok"] is True
+    assert result["cobertura"] == "fuera_de_zona"

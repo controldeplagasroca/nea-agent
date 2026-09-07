@@ -58,6 +58,55 @@ def _sin_acentos(texto: str) -> str:
     return texto.translate(reemplazos)
 
 
+# Zonas fuera de cobertura, documentadas por el negocio. Determinístico a
+# propósito: un LLM chico no distingue de forma confiable entre colonias
+# homónimas de distintas alcaldías/municipios (ver _evaluar_cobertura) — se
+# vio en vivo que declaraba "está en zona de cobertura" solo por el nombre de
+# la colonia, dos veces seguidas, incluso con la regla escrita en prosa en el
+# perfil del negocio.
+def _fuera_de_cobertura(texto: str) -> bool:
+    t = _sin_acentos(texto.lower())
+    if "tepito" in t:
+        return True
+    if "ecatepec" in t:
+        return True
+    if "gustavo" in t and "madero" in t:
+        return True
+    return False
+
+
+def _evaluar_cobertura(
+    colonia: str, alcaldia_municipio: str, codigo_postal: str
+) -> dict[str, Any]:
+    if _fuera_de_cobertura(f"{colonia} {alcaldia_municipio}"):
+        return {
+            "ok": True,
+            "cobertura": "fuera_de_zona",
+            "instrucciones": (
+                "Esta ubicación NO está en zona de cobertura (Gustavo A. "
+                "Madero, Ecatepec o Tepito). Dile con amabilidad que por ahora "
+                "no dan servicio ahí — no sigas con el flujo de cotización."
+            ),
+        }
+    if not alcaldia_municipio.strip() and not codigo_postal.strip():
+        return {
+            "ok": True,
+            "cobertura": "requiere_mas_datos",
+            "instrucciones": (
+                "El nombre de la colonia NO alcanza para confirmar cobertura: "
+                "hay colonias con el mismo nombre en distintas alcaldías o "
+                "municipios, algunas cubiertas y otras no. NO digas todavía "
+                "que está (o no) en zona de cobertura — pide el código postal "
+                "para confirmarlo."
+            ),
+        }
+    return {
+        "ok": True,
+        "cobertura": "dentro_de_zona",
+        "instrucciones": "Ya puedes confirmar cobertura y seguir el flujo normal.",
+    }
+
+
 def _clasificar_cucaracha(tamano_color: str, ubicacion: str) -> dict[str, Any]:
     tc = _sin_acentos(tamano_color.lower())
     ub = _sin_acentos(ubicacion.lower())
@@ -338,6 +387,43 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
     {
         "type": "function",
         "function": {
+            "name": "verificar_cobertura",
+            "description": (
+                "Verifica determinísticamente si un domicilio está en zona de "
+                "cobertura. SIEMPRE llámala, en ESE turno, antes de decir "
+                "cualquier cosa sobre cobertura — nunca respondas de memoria "
+                "ni por el nombre de la colonia solo, ni aunque ya hayas visto "
+                "esa colonia antes en la conversación: hay colonias con el "
+                "mismo nombre en distintas alcaldías o municipios, algunas "
+                "cubiertas y otras no."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "colonia": {
+                        "type": "string",
+                        "description": "Colonia que dio el lead, tal cual",
+                    },
+                    "alcaldia_municipio": {
+                        "type": "string",
+                        "description": (
+                            "Alcaldía o municipio SOLO si el lead lo dijo "
+                            "explícitamente (p.ej. 'Cuauhtémoc', 'Ecatepec', "
+                            "'Toluca'); cadena vacía si no lo dijo"
+                        ),
+                    },
+                    "codigo_postal": {
+                        "type": "string",
+                        "description": "Código postal si el lead ya lo dio; cadena vacía si no",
+                    },
+                },
+                "required": ["colonia", "alcaldia_municipio", "codigo_postal"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "calcular",
             "description": (
                 "Calculadora determinista. Úsala SIEMPRE que una cotización "
@@ -479,6 +565,8 @@ class ToolRuntime:
                 return await self._route_out()
             if name == "identificar_plaga":
                 return self._identificar_plaga(args)
+            if name == "verificar_cobertura":
+                return self._verificar_cobertura(args)
             if name == "calcular":
                 return self._calcular(args)
             if name == "handoff":
@@ -732,6 +820,12 @@ class ToolRuntime:
         tamano_color = str(args.get("tamano_color") or "")
         ubicacion = str(args.get("ubicacion") or "")
         return _clasificar_cucaracha(tamano_color, ubicacion)
+
+    def _verificar_cobertura(self, args: dict[str, Any]) -> dict[str, Any]:
+        colonia = str(args.get("colonia") or "")
+        alcaldia_municipio = str(args.get("alcaldia_municipio") or "")
+        codigo_postal = str(args.get("codigo_postal") or "")
+        return _evaluar_cobertura(colonia, alcaldia_municipio, codigo_postal)
 
     def _calcular(self, args: dict[str, Any]) -> dict[str, Any]:
         try:
