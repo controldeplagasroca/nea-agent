@@ -44,11 +44,15 @@ async def runtime_y_ctx():
     await ctx.crm.aclose()
 
 
+DIRECCION_OK = "Calle Amores 123, depto 4B"
+
+
 async def test_book_rechaza_slot_no_ofrecido(runtime_y_ctx):
     runtime, ctx, conv = runtime_y_ctx
     result = await runtime.execute(
-        "book_session", {"start_utc": "2026-07-20T17:00:00Z"}  # nunca ofrecido
-    )
+        "book_session",
+        {"start_utc": "2026-07-20T17:00:00Z", "direccion_completa": DIRECCION_OK},
+    )  # nunca ofrecido
     assert result["ok"] is False
     assert result["error"] == "slot_no_ofrecido"
     assert ctx.calendar.booking_calls == []  # jamás llegó a la agenda
@@ -57,12 +61,16 @@ async def test_book_rechaza_slot_no_ofrecido(runtime_y_ctx):
 
 async def test_book_acepta_slot_ofrecido_epoch_exacto(runtime_y_ctx, respx_mock):
     runtime, ctx, conv = runtime_y_ctx
-    respx_mock.put(f"{CRM_URL}/api/bot/ficha").mock(
+    ficha_route = respx_mock.put(f"{CRM_URL}/api/bot/ficha").mock(
         return_value=httpx.Response(200, json={"ficha": {}, "stageMoved": True})
     )
     # mismo instante escrito con offset en vez de Z — el epoch es lo que cuenta
     result = await runtime.execute(
-        "book_session", {"start_utc": "2026-07-20T16:00:00+00:00"}
+        "book_session",
+        {
+            "start_utc": "2026-07-20T16:00:00+00:00",
+            "direccion_completa": DIRECCION_OK,
+        },
     )
     assert result["ok"] is True
     assert runtime.booked is True
@@ -76,6 +84,9 @@ async def test_book_acepta_slot_ofrecido_epoch_exacto(runtime_y_ctx, respx_mock)
     assert active is not None
     assert active.google_event_id == "evt_1"
     assert active.start_utc == SLOT_DT
+    # la dirección real queda guardada en la ficha del lead (campo geo)
+    body = json.loads(ficha_route.calls[0].request.content)
+    assert body["ficha"]["geo"] == DIRECCION_OK
 
 
 async def test_book_slot_taken_ofrece_alternativas_frescas(runtime_y_ctx):
@@ -85,13 +96,47 @@ async def test_book_slot_taken_ofrece_alternativas_frescas(runtime_y_ctx):
         {"startUtc": "2026-07-21T17:00:00Z", "endUtc": None, "label": "martes 21, 11:00 am"},
     ]
     ctx.calendar.create_result = CalendarSlotTaken(frescos)
-    result = await runtime.execute("book_session", {"start_utc": SLOT_ISO})
+    result = await runtime.execute(
+        "book_session", {"start_utc": SLOT_ISO, "direccion_completa": DIRECCION_OK}
+    )
     assert result["ok"] is False
     assert result["error"] == "slot_taken"
     assert [s["label"] for s in result["slots"]] == [s["label"] for s in frescos]
     # los frescos quedan como los nuevos (y únicos) reservables
     offered = await ctx.store.get_offered_slots(conv.id)
     assert [s.label for s in offered] == [s["label"] for s in frescos]
+    assert runtime.booked is False
+
+
+async def test_book_rechaza_direccion_vacia(runtime_y_ctx):
+    """Regresión (2026-09-07): en vivo, el bot agendó una cita real con SOLO
+    colonia+alcaldía (dato usado para verificar cobertura) y JAMÁS pidió
+    calle, número exterior/interior ni referencia de acceso -- la regla en
+    prosa ("nunca agendes sin dirección completa") no bastó, mismo patrón
+    que verificar_cobertura. book_session debe rechazarlo server-side."""
+    runtime, ctx, conv = runtime_y_ctx
+    result = await runtime.execute(
+        "book_session", {"start_utc": SLOT_ISO, "direccion_completa": ""}
+    )
+    assert result["ok"] is False
+    assert result["error"] == "direccion_incompleta"
+    assert ctx.calendar.booking_calls == []
+    assert runtime.booked is False
+
+
+async def test_book_rechaza_direccion_sin_numero(runtime_y_ctx):
+    """Colonia+alcaldía sola (sin calle/número) no es una dirección real para
+    que el técnico llegue -- debe seguir pidiéndose calle y número."""
+    runtime, ctx, conv = runtime_y_ctx
+    result = await runtime.execute(
+        "book_session",
+        {
+            "start_utc": SLOT_ISO,
+            "direccion_completa": "Colonia Nápoles, Benito Juárez",
+        },
+    )
+    assert result["ok"] is False
+    assert result["error"] == "direccion_incompleta"
     assert runtime.booked is False
 
 

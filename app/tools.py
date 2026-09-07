@@ -119,6 +119,22 @@ _UBICACION_PALABRAS = (
 _CP_RE = re.compile(r"\b\d{5}\b")
 
 
+def _direccion_incompleta(direccion: str) -> bool:
+    """Heurística server-side: ¿tiene pinta de dirección real (calle+número)?
+
+    No es exhaustiva -- solo evita el placeholder vacío/genérico que un LLM
+    podría inventar para poder rellenar un parámetro "required" del schema.
+    En vivo (2026-09-07), sin esta validación, el bot agendó una cita real
+    con SOLO colonia+alcaldía (para cobertura) y JAMÁS pidió calle, número o
+    referencia de acceso -- la instrucción en prosa ("nunca agendes sin
+    dirección completa") no bastó, mismo patrón que verificar_cobertura.
+    """
+    d = direccion.strip()
+    if len(d) < 8:
+        return True
+    return not any(ch.isdigit() for ch in d)
+
+
 def requiere_verificar_cobertura(texto: str) -> bool:
     """Heurística server-side: ¿el mensaje del lead menciona su ubicación?
 
@@ -304,7 +320,11 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
                 "Reserva la cita en uno de los horarios previamente ofrecidos. "
                 "start_utc debe ser EXACTAMENTE el start_utc de un slot ofrecido "
                 "en esta conversación. Llámala SOLO después de haber nombrado el "
-                "día completo y de que el lead lo aceptara sin ambigüedad."
+                "día completo y de que el lead lo aceptara sin ambigüedad, Y "
+                "después de haberle pedido la dirección completa del domicilio "
+                "(calle, número exterior, número interior si aplica, y una "
+                "referencia de acceso — timbre o si hay que llamarle al llegar) "
+                "— nunca inventes ni pongas un placeholder en direccion_completa."
             ),
             "parameters": {
                 "type": "object",
@@ -321,8 +341,18 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
                             "en vez de reservar."
                         ),
                     },
+                    "direccion_completa": {
+                        "type": "string",
+                        "description": (
+                            "Calle y número exterior como mínimo (idealmente "
+                            "también número interior, colonia/alcaldía si no se "
+                            "dieron antes, y la referencia de acceso), tal cual "
+                            "las dio el lead. Si el lead todavía no las dio, NO "
+                            "llames esta función — pídeselas primero."
+                        ),
+                    },
                 },
-                "required": ["start_utc", "dia_confirmado"],
+                "required": ["start_utc", "dia_confirmado", "direccion_completa"],
             },
         },
     },
@@ -716,6 +746,19 @@ class ToolRuntime:
         return f"Visita {etiqueta} — {self._conv.wa_identity}"
 
     async def _book_session(self, args: dict[str, Any]) -> dict[str, Any]:
+        direccion = str(args.get("direccion_completa") or "")
+        if _direccion_incompleta(direccion):
+            return {
+                "ok": False,
+                "error": "direccion_incompleta",
+                "detalle": (
+                    "Todavía no tienes la dirección completa del domicilio "
+                    "(calle y número exterior como mínimo) para que el técnico "
+                    "pueda llegar. Pídesela al lead — no la inventes ni uses un "
+                    "placeholder — y vuelve a llamar book_session cuando la "
+                    "tengas."
+                ),
+            }
         chosen, error = await self._resolve_offered(args, "book_session")
         if error is not None or chosen is None:
             return error or {"ok": False, "error": "slot_no_ofrecido"}
@@ -745,7 +788,8 @@ class ToolRuntime:
         self.booked = True
         try:
             await self._ctx.crm.put_ficha(
-                self._crm_conv_id, {"calificado": True, "resultado": "agendo"}
+                self._crm_conv_id,
+                {"calificado": True, "resultado": "agendo", "geo": direccion},
             )
         except CrmError as exc:  # best-effort: la cita ya existe
             logger.warning("tools: no pude actualizar ficha tras booking: %s", exc)
