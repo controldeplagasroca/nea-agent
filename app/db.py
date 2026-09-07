@@ -63,6 +63,8 @@ def _pending_from_row(row: asyncpg.Record) -> PendingBooking:
         label=row["label"],
         direccion=row["direccion"],
         dia_confirmado=row["dia_confirmado"],
+        costo_cotizado=float(row["costo_cotizado"]),
+        telefono_cliente=row["telefono_cliente"],
         estado=row["estado"],
         reminders_sent=row["reminders_sent"],
         next_reminder_at=row["next_reminder_at"],
@@ -389,13 +391,16 @@ class PgStore:
         direccion: str,
         dia_confirmado: str,
         next_reminder_at: datetime,
+        costo_cotizado: float = 0.0,
+        telefono_cliente: str = "",
     ) -> PendingBooking:
         row = await self.pool.fetchrow(
             """
             INSERT INTO pending_bookings
                 (conversation_id, crm_conversation_id, service_key, start_utc,
-                 end_utc, label, direccion, dia_confirmado, next_reminder_at)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+                 end_utc, label, direccion, dia_confirmado, next_reminder_at,
+                 costo_cotizado, telefono_cliente)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
             RETURNING *
             """,
             conversation_id,
@@ -407,6 +412,8 @@ class PgStore:
             direccion,
             dia_confirmado,
             next_reminder_at,
+            costo_cotizado,
+            telefono_cliente,
         )
         assert row is not None
         return _pending_from_row(row)

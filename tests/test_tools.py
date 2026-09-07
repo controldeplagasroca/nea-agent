@@ -82,7 +82,11 @@ async def test_book_rechaza_slot_no_ofrecido(runtime_y_ctx):
     runtime, ctx, conv = runtime_y_ctx
     result = await runtime.execute(
         "book_session",
-        {"start_utc": "2026-07-20T17:00:00Z", "direccion_completa": DIRECCION_OK},
+        {
+            "start_utc": "2026-07-20T17:00:00Z",
+            "direccion_completa": DIRECCION_OK,
+            "costo_cotizado": 1500,
+        },
     )  # nunca ofrecido
     assert result["ok"] is False
     assert result["error"] == "slot_no_ofrecido"
@@ -101,6 +105,7 @@ async def test_book_acepta_slot_ofrecido_epoch_exacto(runtime_y_ctx, respx_mock)
         {
             "start_utc": "2026-07-20T16:00:00+00:00",
             "direccion_completa": DIRECCION_OK,
+            "costo_cotizado": 1500,
         },
     )
     assert result["ok"] is True
@@ -109,6 +114,13 @@ async def test_book_acepta_slot_ofrecido_epoch_exacto(runtime_y_ctx, respx_mock)
     assert call["start_utc"] == SLOT_DT
     assert call["end_utc"] == SLOT_END_DT
     assert call["service_key"] == "alemana"
+    # la description trae el bloque de datos que ROCA Ops lee (solo tiene
+    # acceso de lectura al calendario, nunca a esta BD)
+    assert "---ROCA-OPS-DATA---" in call["description"]
+    payload = json.loads(call["description"].split("---ROCA-OPS-DATA---\n")[1])
+    assert payload["costo"] == 1500
+    assert payload["direccion"] == DIRECCION_OK
+    assert payload["telefono_cliente"] == IDENTITY
     # al reservar se limpian los ofrecidos y queda la cita activa rastreada
     assert await ctx.store.get_offered_slots(conv.id) == []
     active = await ctx.store.get_active_calendar_booking(conv.id)
@@ -128,7 +140,12 @@ async def test_book_slot_taken_ofrece_alternativas_frescas(runtime_y_ctx):
     ]
     ctx.calendar.create_result = CalendarSlotTaken(frescos)
     result = await runtime.execute(
-        "book_session", {"start_utc": SLOT_ISO, "direccion_completa": DIRECCION_OK}
+        "book_session",
+        {
+            "start_utc": SLOT_ISO,
+            "direccion_completa": DIRECCION_OK,
+            "costo_cotizado": 1500,
+        },
     )
     assert result["ok"] is False
     assert result["error"] == "slot_taken"
@@ -175,6 +192,7 @@ async def test_book_con_dueno_no_reserva_directo_crea_pendiente(
             "start_utc": SLOT_ISO,
             "dia_confirmado": "lunes a las 10",
             "direccion_completa": DIRECCION_OK,
+            "costo_cotizado": 1500,
         },
     )
     assert result["ok"] is True
@@ -186,6 +204,8 @@ async def test_book_con_dueno_no_reserva_directo_crea_pendiente(
     assert len(pendientes) == 1
     assert pendientes[0].direccion == DIRECCION_OK
     assert pendientes[0].crm_conversation_id == CRM_CONV_ID
+    assert pendientes[0].costo_cotizado == 1500
+    assert pendientes[0].telefono_cliente == IDENTITY
 
     body = json.loads(owner_msg_route.calls[0].request.content)
     assert body["conversationId"] == "cv_owner"
@@ -214,6 +234,7 @@ async def test_book_rechaza_direccion_reciclada_de_otro_domicilio(
             "start_utc": SLOT_ISO,
             "dia_confirmado": "lunes a las 10",
             "direccion_completa": DIRECCION_OK,
+            "costo_cotizado": 1500,
         },
     )
     assert result["ok"] is False
@@ -249,6 +270,7 @@ async def test_book_acepta_direccion_repetida_si_el_lead_la_reescribio(
             "start_utc": SLOT_ISO,
             "dia_confirmado": "lunes a las 10",
             "direccion_completa": DIRECCION_OK,
+            "costo_cotizado": 1500,
         },
     )
     assert result["ok"] is True
@@ -277,6 +299,7 @@ async def test_book_direccion_nueva_sin_coincidencia_no_se_rechaza(
             "start_utc": SLOT_ISO,
             "dia_confirmado": "lunes a las 10",
             "direccion_completa": "Calle Reforma 789, colonia Nápoles",
+            "costo_cotizado": 1500,
         },
     )
     assert result["ok"] is True
@@ -297,6 +320,36 @@ async def test_book_rechaza_direccion_sin_numero(runtime_y_ctx):
     assert result["ok"] is False
     assert result["error"] == "direccion_incompleta"
     assert runtime.booked is False
+
+
+async def test_book_rechaza_costo_faltante(runtime_y_ctx):
+    """Regresión (2026-09-07): costo_cotizado es requisito para que ROCA Ops
+    pueda designar técnico después (ver app/approvals.py) -- nunca debe
+    quedar en blanco ni inventado."""
+    runtime, ctx, conv = runtime_y_ctx
+    result = await runtime.execute(
+        "book_session",
+        {"start_utc": SLOT_ISO, "direccion_completa": DIRECCION_OK},
+    )
+    assert result["ok"] is False
+    assert result["error"] == "costo_invalido"
+    assert ctx.calendar.booking_calls == []
+    assert runtime.booked is False
+
+
+async def test_book_rechaza_costo_cero_o_negativo(runtime_y_ctx):
+    runtime, ctx, conv = runtime_y_ctx
+    for costo in (0, -100):
+        result = await runtime.execute(
+            "book_session",
+            {
+                "start_utc": SLOT_ISO,
+                "direccion_completa": DIRECCION_OK,
+                "costo_cotizado": costo,
+            },
+        )
+        assert result["ok"] is False
+        assert result["error"] == "costo_invalido"
 
 
 async def test_propose_slots_pide_reparto_por_dia_y_persiste_todos(runtime_y_ctx):

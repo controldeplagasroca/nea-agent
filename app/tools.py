@@ -14,7 +14,7 @@ import re
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from app.approvals import enviar_solicitud_aprobacion, next_reminder
+from app.approvals import construir_description_evento, enviar_solicitud_aprobacion, next_reminder
 from app.crm import CrmError
 from app.gcal import SERVICE_RULES, CalendarError, CalendarSlotTaken
 from app.profile import BusinessProfile
@@ -160,6 +160,16 @@ def _direccion_incompleta(direccion: str) -> bool:
     if len(d) < 8:
         return True
     return not any(ch.isdigit() for ch in d)
+
+
+def _costo_invalido(costo: Any) -> bool:
+    """¿El costo cotizado no tiene pinta de un precio real? Proxy simple:
+    debe convertir a número positivo. Rechaza vacío, None, texto no
+    numérico, 0 o negativos."""
+    try:
+        return not (float(costo) > 0)
+    except (TypeError, ValueError):
+        return True
 
 
 _DIGITOS_RE = re.compile(r"\d{2,}")
@@ -415,8 +425,22 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
                             "cuenta como haberlos dado)."
                         ),
                     },
+                    "costo_cotizado": {
+                        "type": "number",
+                        "description": (
+                            "El precio en MXN de ESTA visita, tal cual ya lo "
+                            "cotizaste con la tool calcular (o el precio directo "
+                            "del catálogo si no requería cálculo) — nunca lo "
+                            "inventes de memoria aquí."
+                        ),
+                    },
                 },
-                "required": ["start_utc", "dia_confirmado", "direccion_completa"],
+                "required": [
+                    "start_utc",
+                    "dia_confirmado",
+                    "direccion_completa",
+                    "costo_cotizado",
+                ],
             },
         },
     },
@@ -825,6 +849,20 @@ class ToolRuntime:
                     "book_session cuando la tengas completa."
                 ),
             }
+        costo_cotizado = args.get("costo_cotizado")
+        if _costo_invalido(costo_cotizado):
+            return {
+                "ok": False,
+                "error": "costo_invalido",
+                "detalle": (
+                    "costo_cotizado falta o no es un número positivo. Usa la "
+                    "tool calcular para obtener el precio de esta visita (o el "
+                    "precio directo del catálogo si no requiere cálculo) — "
+                    "nunca lo inventes — y vuelve a llamar book_session con "
+                    "ese valor."
+                ),
+            }
+        costo_cotizado = float(costo_cotizado)
         previas = await self._ctx.store.list_pending_bookings_for_conversation(self._conv.id)
         if previas:
             historial = await self._ctx.store.recent_messages(self._conv.id, 15)
@@ -854,14 +892,24 @@ class ToolRuntime:
 
         owner_identity = self._ctx.settings.owner_identity
         if owner_identity:
-            return await self._book_pendiente_aprobacion(chosen, end, direccion, args)
+            return await self._book_pendiente_aprobacion(
+                chosen, end, direccion, costo_cotizado, args
+            )
 
+        description = construir_description_evento(
+            texto_base=f"Agendado por Nea. Conversación CRM {self._crm_conv_id}.",
+            telefono_cliente=self._conv.wa_identity,
+            direccion=direccion,
+            service_key=chosen.service_key,
+            costo=costo_cotizado,
+            crm_conversation_id=self._crm_conv_id,
+        )
         try:
             result = await self._ctx.calendar.create_booking(
                 chosen.start_utc,
                 end,
                 self._resumen_evento(chosen.service_key),
-                f"Agendado por Nea. Conversación CRM {self._crm_conv_id}.",
+                description,
                 chosen.service_key,
             )
         except CalendarSlotTaken as exc:
@@ -896,7 +944,12 @@ class ToolRuntime:
         }
 
     async def _book_pendiente_aprobacion(
-        self, chosen: OfferedSlot, end: Any, direccion: str, args: dict[str, Any]
+        self,
+        chosen: OfferedSlot,
+        end: Any,
+        direccion: str,
+        costo_cotizado: float,
+        args: dict[str, Any],
     ) -> dict[str, Any]:
         """Candado de negocio: el dueño tiene que aprobar antes de reservar
         de verdad (ver app/approvals.py). NO llama a Google Calendar aquí."""
@@ -910,6 +963,8 @@ class ToolRuntime:
             direccion,
             str(args.get("dia_confirmado") or ""),
             next_reminder(self._ctx.settings.booking_reminder_minutes),
+            costo_cotizado,
+            self._conv.wa_identity,
         )
         await self._ctx.store.clear_offered_slots(self._conv.id)
         avisado = await enviar_solicitud_aprobacion(self._ctx, pending)

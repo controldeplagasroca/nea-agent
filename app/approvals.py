@@ -10,6 +10,7 @@ lo reusan tanto el gate de `app/turn.py` (cuando el dueño responde) como
 """
 from __future__ import annotations
 
+import json
 import logging
 import re
 from datetime import datetime, timedelta
@@ -20,6 +21,33 @@ from app.gcal import SERVICE_RULES, CalendarError, CalendarSlotTaken
 from app.state import AppContext, PendingBooking, utcnow
 
 logger = logging.getLogger("nea.approvals")
+
+# Marcador que delimita el bloque de datos estructurados dentro de la
+# description del evento de Calendar -- ROCA Ops solo tiene acceso de
+# LECTURA al calendario compartido (nunca a la BD de nea-agent), así que
+# esto es la única forma de que sepa costo/dirección/teléfono sin un
+# segundo sistema de integración. Ver roca-ops-backend/src/services/
+# calendarService.ts (lectura) y la pestaña "Servicios" del admin-panel.
+ROCA_OPS_DATA_MARKER = "---ROCA-OPS-DATA---"
+
+
+def construir_description_evento(
+    *,
+    texto_base: str,
+    telefono_cliente: str,
+    direccion: str,
+    service_key: str,
+    costo: float,
+    crm_conversation_id: str,
+) -> str:
+    payload = {
+        "telefono_cliente": telefono_cliente,
+        "direccion": direccion,
+        "plaga": service_key,
+        "costo": costo,
+        "crm_conversation_id": crm_conversation_id,
+    }
+    return f"{texto_base}\n\n{ROCA_OPS_DATA_MARKER}\n{json.dumps(payload, ensure_ascii=False)}"
 
 _SI_PALABRAS = (
     "si", "sí", "aprobar", "aprobado", "aprueba", "apruebo", "confirmar",
@@ -137,12 +165,20 @@ async def resolver_aprobacion(ctx: AppContext, pending: PendingBooking, aprobado
         )
         return f"Ok, cita #{pending.id} rechazada — ya avisé al cliente ❌"
 
+    description = construir_description_evento(
+        texto_base=f"Agendado por Nea (aprobado). Conversación CRM {pending.crm_conversation_id}.",
+        telefono_cliente=pending.telefono_cliente,
+        direccion=pending.direccion,
+        service_key=pending.service_key,
+        costo=pending.costo_cotizado,
+        crm_conversation_id=pending.crm_conversation_id,
+    )
     try:
         result = await ctx.calendar.create_booking(
             pending.start_utc,
             pending.end_utc,
             _resumen_evento(pending),
-            f"Agendado por Nea (aprobado). Conversación CRM {pending.crm_conversation_id}.",
+            description,
             pending.service_key,
         )
     except CalendarSlotTaken:

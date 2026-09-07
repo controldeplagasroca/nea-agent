@@ -92,6 +92,8 @@ class PendingBooking:
     label: str
     direccion: str
     dia_confirmado: str
+    costo_cotizado: float = 0.0
+    telefono_cliente: str = ""
     estado: str = "pendiente"  # pendiente | aprobado | rechazado
     reminders_sent: int = 0
     next_reminder_at: datetime = field(default_factory=utcnow)
@@ -223,6 +225,8 @@ class Store(Protocol):
         direccion: str,
         dia_confirmado: str,
         next_reminder_at: datetime,
+        costo_cotizado: float = 0.0,
+        telefono_cliente: str = "",
     ) -> PendingBooking: ...
     async def get_pending_booking(self, pending_id: int) -> PendingBooking | None: ...
     async def list_pending_bookings_pendientes(self) -> list[PendingBooking]: ...
@@ -422,6 +426,8 @@ class MemoryStore:
         direccion: str,
         dia_confirmado: str,
         next_reminder_at: datetime,
+        costo_cotizado: float = 0.0,
+        telefono_cliente: str = "",
     ) -> PendingBooking:
         pid = next(self._ids)
         pending = PendingBooking(
@@ -435,6 +441,8 @@ class MemoryStore:
             direccion=direccion,
             dia_confirmado=dia_confirmado,
             next_reminder_at=next_reminder_at,
+            costo_cotizado=costo_cotizado,
+            telefono_cliente=telefono_cliente,
         )
         self.pending_bookings[pid] = pending
         return pending
