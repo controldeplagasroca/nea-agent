@@ -22,6 +22,7 @@ from app.coalesce import Coalescer
 from app.config import Settings
 from app.crm import CrmClient
 from app.db import PgStore
+from app.booking_reminders import ApprovalReminderWorker
 from app.followup import FollowupWorker
 from app.gcal import GoogleCalendarClient, NullCalendarClient
 from app.llm import OpenAiLlm
@@ -104,12 +105,16 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
         relay_worker = RelayWorker(c.store, c.settings.crm_webhook_url, c.relay_wake)
         followup_worker = FollowupWorker(c)
         sender_worker = SenderWorker(c)
+        booking_reminder_worker = ApprovalReminderWorker(c)
         workers = [
             asyncio.create_task(relay_worker.run(), name="relay-worker"),
             asyncio.create_task(followup_worker.run(), name="followup-worker"),
             asyncio.create_task(sender_worker.run(), name="sender-worker"),
+            asyncio.create_task(
+                booking_reminder_worker.run(), name="booking-reminder-worker"
+            ),
         ]
-        logger.info("Nea arriba: relay + followup + sender corriendo")
+        logger.info("Nea arriba: relay + followup + sender + booking-reminder corriendo")
         try:
             yield
         finally:

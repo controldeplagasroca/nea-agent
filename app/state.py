@@ -78,6 +78,28 @@ class CalendarBooking:
 
 
 @dataclass
+class PendingBooking:
+    """Cita que el lead confirmó pero que espera aprobación del dueño antes
+    de reservarse de verdad en Google Calendar (candado de negocio, no
+    técnico — ver book_session en app/tools.py)."""
+
+    id: int
+    conversation_id: int
+    crm_conversation_id: str
+    service_key: str
+    start_utc: datetime
+    end_utc: datetime
+    label: str
+    direccion: str
+    dia_confirmado: str
+    estado: str = "pendiente"  # pendiente | aprobado | rechazado
+    reminders_sent: int = 0
+    next_reminder_at: datetime = field(default_factory=utcnow)
+    created_at: datetime = field(default_factory=utcnow)
+    resolved_at: datetime | None = None
+
+
+@dataclass
 class RelayItem:
     id: int
     body: bytes
@@ -189,6 +211,29 @@ class Store(Protocol):
     ) -> None: ...
     async def cancel_calendar_booking(self, conversation_id: int) -> None: ...
 
+    # aprobación del dueño antes de reservar (candado de negocio)
+    async def create_pending_booking(
+        self,
+        conversation_id: int,
+        crm_conversation_id: str,
+        service_key: str,
+        start_utc: datetime,
+        end_utc: datetime,
+        label: str,
+        direccion: str,
+        dia_confirmado: str,
+        next_reminder_at: datetime,
+    ) -> PendingBooking: ...
+    async def get_pending_booking(self, pending_id: int) -> PendingBooking | None: ...
+    async def list_pending_bookings_pendientes(self) -> list[PendingBooking]: ...
+    async def due_booking_reminders(self, now: datetime) -> list[PendingBooking]: ...
+    async def mark_booking_reminder_sent(
+        self, pending_id: int, next_reminder_at: datetime
+    ) -> None: ...
+    async def resolve_pending_booking(self, pending_id: int, estado: str) -> None:
+        """estado: 'aprobado' o 'rechazado' — marca resolved_at = now()."""
+        ...
+
     # cola de envíos pendientes (respuestas que no pudieron salir en el turno)
     async def enqueue_pending_send(
         self, conversation_id: int, crm_conversation_id: str, content: str
@@ -226,6 +271,7 @@ class MemoryStore:
         self.offered: dict[int, list[OfferedSlot]] = {}
         self.pending_sends: dict[int, PendingSend] = {}
         self.calendar_bookings: dict[int, CalendarBooking] = {}  # por conversation_id, solo la activa
+        self.pending_bookings: dict[int, PendingBooking] = {}
 
     async def mark_processed(self, wa_message_id: str) -> bool:
         if wa_message_id in self.processed:
@@ -358,6 +404,63 @@ class MemoryStore:
 
     async def cancel_calendar_booking(self, conversation_id: int) -> None:
         self.calendar_bookings.pop(conversation_id, None)
+
+    async def create_pending_booking(
+        self,
+        conversation_id: int,
+        crm_conversation_id: str,
+        service_key: str,
+        start_utc: datetime,
+        end_utc: datetime,
+        label: str,
+        direccion: str,
+        dia_confirmado: str,
+        next_reminder_at: datetime,
+    ) -> PendingBooking:
+        pid = next(self._ids)
+        pending = PendingBooking(
+            id=pid,
+            conversation_id=conversation_id,
+            crm_conversation_id=crm_conversation_id,
+            service_key=service_key,
+            start_utc=start_utc,
+            end_utc=end_utc,
+            label=label,
+            direccion=direccion,
+            dia_confirmado=dia_confirmado,
+            next_reminder_at=next_reminder_at,
+        )
+        self.pending_bookings[pid] = pending
+        return pending
+
+    async def get_pending_booking(self, pending_id: int) -> PendingBooking | None:
+        return self.pending_bookings.get(pending_id)
+
+    async def list_pending_bookings_pendientes(self) -> list[PendingBooking]:
+        return sorted(
+            (p for p in self.pending_bookings.values() if p.estado == "pendiente"),
+            key=lambda p: p.id,
+        )
+
+    async def due_booking_reminders(self, now: datetime) -> list[PendingBooking]:
+        return [
+            p for p in sorted(self.pending_bookings.values(), key=lambda p: p.id)
+            if p.estado == "pendiente" and p.next_reminder_at <= now
+        ]
+
+    async def mark_booking_reminder_sent(
+        self, pending_id: int, next_reminder_at: datetime
+    ) -> None:
+        pending = self.pending_bookings.get(pending_id)
+        if pending is not None:
+            pending.reminders_sent += 1
+            pending.next_reminder_at = next_reminder_at
+
+    async def resolve_pending_booking(self, pending_id: int, estado: str) -> None:
+        pending = self.pending_bookings.get(pending_id)
+        if pending is not None:
+            pending.estado = estado
+            pending.resolved_at = utcnow()
 
     async def enqueue_pending_send(
         self, conversation_id: int, crm_conversation_id: str, content: str

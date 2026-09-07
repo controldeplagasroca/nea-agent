@@ -5,10 +5,22 @@ import asyncio
 import json
 from datetime import datetime, timezone
 
+import httpx
+
 from app.llm import LlmExhausted, LlmReply, ToolCall
 from app.state import OfferedSlot, utcnow
 from app.turn import BOOK_SESSION_CHOICE, VERIFICAR_COBERTURA_CHOICE
-from tests.conftest import IDENTITY, FakeLLM, mock_crm_basics, wa_body
+from tests.conftest import (
+    CRM_CONV_ID,
+    CRM_URL,
+    IDENTITY,
+    FakeLLM,
+    crm_context,
+    mock_crm_basics,
+    wa_body,
+)
+
+OWNER_ID = "525500000000"
 
 
 async def test_handoff_despedida_primero_pausa_despues(ctx, client, respx_mock):
@@ -238,3 +250,56 @@ async def test_no_forzar_book_session_sin_slots_ofrecidos(ctx, client, respx_moc
 
     assert routes["messages"].call_count == 1
     assert ctx.llm.calls[0]["tool_choice"] is None
+
+
+async def test_gate_aprobacion_dueno_no_llega_al_llm(ctx, client, respx_mock):
+    """Regresión: si el dueño responde "sí <folio>" a una cita pendiente, el
+    mensaje NUNCA debe llegar al LLM como si fuera un lead normal (mezclaría
+    su respuesta de aprobación con su propio flujo de pruebas)."""
+    ctx.settings.owner_wa_id = OWNER_ID
+    lead_conv = await ctx.store.get_or_create_conversation(IDENTITY)
+    pending = await ctx.store.create_pending_booking(
+        lead_conv.id,
+        CRM_CONV_ID,
+        "alemana",
+        datetime(2026, 7, 20, 16, 0, tzinfo=timezone.utc),
+        datetime(2026, 7, 20, 17, 30, tzinfo=timezone.utc),
+        "lunes 20 de julio, 10:00 am",
+        "Calle Amores 123, depto 4B",
+        "lunes a las 10",
+        utcnow(),
+    )
+    respx_mock.get(f"{CRM_URL}/api/bot/context", params={"waIdentity": OWNER_ID}).mock(
+        return_value=httpx.Response(200, json=crm_context(conv_id="cv_owner"))
+    )
+    respx_mock.put(f"{CRM_URL}/api/bot/ficha").mock(
+        return_value=httpx.Response(200, json={"ficha": {}, "stageMoved": False})
+    )
+    msg_route = respx_mock.post(f"{CRM_URL}/api/bot/messages").mock(
+        return_value=httpx.Response(200, json={"messageId": "msg_1"})
+    )
+
+    await client.post("/webhook", content=wa_body(text=f"si {pending.id}", frm=OWNER_ID))
+    await asyncio.sleep(0.25)
+
+    assert ctx.llm.calls == []  # nunca abrió turno de conversación normal
+    conv_ids = {json.loads(c.request.content)["conversationId"] for c in msg_route.calls}
+    assert "cv_owner" in conv_ids  # confirmación breve al dueño
+    assert CRM_CONV_ID in conv_ids  # aviso de cita confirmada al lead
+
+    resolved = await ctx.store.get_pending_booking(pending.id)
+    assert resolved.estado == "aprobado"
+
+
+async def test_dueno_sin_pendientes_sigue_flujo_normal(ctx, client, respx_mock):
+    """Sin ninguna cita pendiente, el número del dueño se comporta como
+    cualquier lead normal (así conserva su número de pruebas de siempre)."""
+    ctx.settings.owner_wa_id = OWNER_ID
+    routes = mock_crm_basics(respx_mock)
+    ctx.llm.replies = [LlmReply(content="¡Hola! ¿Qué plaga tienes?")]
+
+    await client.post("/webhook", content=wa_body(text="hola", frm=OWNER_ID))
+    await asyncio.sleep(0.25)
+
+    assert len(ctx.llm.calls) == 1
+    assert routes["messages"].call_count == 1

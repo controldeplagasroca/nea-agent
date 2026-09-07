@@ -16,6 +16,7 @@ from app.state import (
     CalendarBooking,
     Conversation,
     OfferedSlot,
+    PendingBooking,
     PendingSend,
     RelayItem,
 )
@@ -48,6 +49,25 @@ def _conv_from_row(row: asyncpg.Record) -> Conversation:
         followup_sent=row["followup_sent"],
         last_inbound_at=row["last_inbound_at"],
         stalled_at=row["stalled_at"],
+    )
+
+
+def _pending_from_row(row: asyncpg.Record) -> PendingBooking:
+    return PendingBooking(
+        id=row["id"],
+        conversation_id=row["conversation_id"],
+        crm_conversation_id=row["crm_conversation_id"],
+        service_key=row["service_key"],
+        start_utc=row["start_utc"],
+        end_utc=row["end_utc"],
+        label=row["label"],
+        direccion=row["direccion"],
+        dia_confirmado=row["dia_confirmado"],
+        estado=row["estado"],
+        reminders_sent=row["reminders_sent"],
+        next_reminder_at=row["next_reminder_at"],
+        created_at=row["created_at"],
+        resolved_at=row["resolved_at"],
     )
 
 
@@ -354,6 +374,84 @@ class PgStore:
             WHERE conversation_id = $1 AND canceled_at IS NULL
             """,
             conversation_id,
+        )
+
+    # -------------------------------------- aprobación del dueño (agenda) ---
+
+    async def create_pending_booking(
+        self,
+        conversation_id: int,
+        crm_conversation_id: str,
+        service_key: str,
+        start_utc: datetime,
+        end_utc: datetime,
+        label: str,
+        direccion: str,
+        dia_confirmado: str,
+        next_reminder_at: datetime,
+    ) -> PendingBooking:
+        row = await self.pool.fetchrow(
+            """
+            INSERT INTO pending_bookings
+                (conversation_id, crm_conversation_id, service_key, start_utc,
+                 end_utc, label, direccion, dia_confirmado, next_reminder_at)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+            RETURNING *
+            """,
+            conversation_id,
+            crm_conversation_id,
+            service_key,
+            start_utc,
+            end_utc,
+            label,
+            direccion,
+            dia_confirmado,
+            next_reminder_at,
+        )
+        assert row is not None
+        return _pending_from_row(row)
+
+    async def get_pending_booking(self, pending_id: int) -> PendingBooking | None:
+        row = await self.pool.fetchrow(
+            "SELECT * FROM pending_bookings WHERE id = $1", pending_id
+        )
+        return _pending_from_row(row) if row is not None else None
+
+    async def list_pending_bookings_pendientes(self) -> list[PendingBooking]:
+        rows = await self.pool.fetch(
+            "SELECT * FROM pending_bookings WHERE estado = 'pendiente' ORDER BY id"
+        )
+        return [_pending_from_row(r) for r in rows]
+
+    async def due_booking_reminders(self, now: datetime) -> list[PendingBooking]:
+        rows = await self.pool.fetch(
+            """
+            SELECT * FROM pending_bookings
+            WHERE estado = 'pendiente' AND next_reminder_at <= $1
+            ORDER BY id
+            """,
+            now,
+        )
+        return [_pending_from_row(r) for r in rows]
+
+    async def mark_booking_reminder_sent(
+        self, pending_id: int, next_reminder_at: datetime
+    ) -> None:
+        await self.pool.execute(
+            """
+            UPDATE pending_bookings
+            SET reminders_sent = reminders_sent + 1, next_reminder_at = $2
+            WHERE id = $1
+            """,
+            pending_id,
+            next_reminder_at,
+        )
+
+    async def resolve_pending_booking(self, pending_id: int, estado: str) -> None:
+        await self.pool.execute(
+            "UPDATE pending_bookings SET estado = $2, resolved_at = now() WHERE id = $1",
+            pending_id,
+            estado,
         )
 
     # ------------------------------------------------- envíos pendientes ---

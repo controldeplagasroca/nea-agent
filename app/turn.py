@@ -15,6 +15,7 @@ from typing import Any, AsyncIterator
 from zoneinfo import ZoneInfo
 
 from app import media
+from app.approvals import listar_pendientes_para_dueno, parece_aprobacion, resolver_aprobacion
 from app.config import canonical_identity
 from app.crm import CrmConflict, CrmError
 from app.hostility import ALERT as HOSTILITY_ALERT, hostile_streak
@@ -113,6 +114,39 @@ async def run_turn(
         return
 
     conv = await ctx.store.get_or_create_conversation(identity)
+
+    # --- Gate 1.2: respuesta de aprobación del dueño (agenda) -------------
+    # Corre ANTES que todo lo demás: si el dueño está aprobando/rechazando
+    # una cita pendiente, este mensaje NUNCA debe llegar al LLM como si fuera
+    # un lead normal -- mezclaría su respuesta de aprobación con su propio
+    # flujo de pruebas como cliente (mismo número). Si el mensaje no tiene
+    # pinta de aprobación (kind == "no_reconocido"), sigue el flujo normal
+    # sin cambios.
+    owner_identity = settings.owner_identity
+    if owner_identity and canonical_identity(identity) == owner_identity:
+        pendientes = await ctx.store.list_pending_bookings_pendientes()
+        if pendientes:
+            texto_dueno = " ".join((m.text or "") for m in inbound).strip()
+            kind, pending, aprueba = parece_aprobacion(texto_dueno, pendientes)
+            if kind != "no_reconocido":
+                if kind == "resuelto" and pending is not None and aprueba is not None:
+                    respuesta = await resolver_aprobacion(ctx, pending, aprueba)
+                else:
+                    respuesta = listar_pendientes_para_dueno(pendientes)
+                owner_context = await _fetch_context(ctx, identity)
+                owner_conv_id = ((owner_context or {}).get("conversation") or {}).get("id")
+                if owner_conv_id:
+                    try:
+                        await ctx.crm.send_message(str(owner_conv_id), respuesta)
+                    except CrmError as exc:
+                        logger.warning(
+                            "gate aprobación: no pude responderle al dueño: %s", exc
+                        )
+                else:
+                    logger.warning(
+                        "gate aprobación: sin conversationId del dueño para responder"
+                    )
+                return
 
     # --- Comando /reset (líneas de prueba) --------------------------------
     # Corre ANTES de los gates de aiEnabled/ventana: un reset también debe

@@ -59,6 +59,11 @@ class Settings(BaseSettings):
     # comando quedaba muerto justo donde hace falta — para correr una ronda
     # de pruebas en vivo había que cerrarle la puerta a los leads reales.
     tester_wa_ids: str = ""  # CSV; vacía = responde a todos (Constitución V)
+    # Número del dueño del negocio que aprueba cada cita antes de reservarla
+    # de verdad (ver pending_bookings en app/state.py). Vacía = sin candado de
+    # aprobación, book_session reserva directo como antes.
+    owner_wa_id: str = ""
+    booking_reminder_minutes: float = 10.0
     coalesce_seconds: float = 4.0
     followup_hours: float = 4.0
     # "Escribiendo…" casi inmediato al recibir un mensaje (antes del coalesce).
@@ -93,3 +98,9 @@ class Settings(BaseSettings):
     def tester_identities(self) -> frozenset[str]:
         """Quién puede correr /reset. Vacía = comando apagado."""
         return self._identities(self.tester_wa_ids)
+
+    @property
+    def owner_identity(self) -> str:
+        """Canonicalizada; cadena vacía = sin candado de aprobación de citas."""
+        s = self.owner_wa_id.strip()
+        return canonical_identity(s) if s else ""

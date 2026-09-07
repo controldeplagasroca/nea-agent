@@ -16,16 +16,47 @@ import pytest
 from app.gcal import CalendarSlotTaken
 from app.state import OfferedSlot
 from app.tools import ToolRuntime
-from tests.conftest import CRM_CONV_ID, CRM_URL, IDENTITY, make_ctx
+from tests.conftest import (
+    CRM_CONV_ID,
+    CRM_URL,
+    IDENTITY,
+    crm_context,
+    make_ctx,
+    make_settings,
+)
 
 SLOT_ISO = "2026-07-20T16:00:00Z"
 SLOT_DT = datetime(2026, 7, 20, 16, 0, tzinfo=timezone.utc)
 SLOT_END_DT = SLOT_DT + timedelta(minutes=90)  # duración de "alemana"
+OWNER_ID = "525500000000"
 
 
 @pytest.fixture
 async def runtime_y_ctx():
     ctx = make_ctx()
+    conv = await ctx.store.get_or_create_conversation(IDENTITY)
+    await ctx.store.replace_offered_slots(
+        conv.id,
+        [
+            OfferedSlot(
+                conversation_id=conv.id,
+                start_utc=SLOT_DT,
+                end_utc=SLOT_END_DT,
+                label="lunes 20 de julio, 10:00 am",
+                service_key="alemana",
+            )
+        ],
+    )
+    runtime = ToolRuntime(ctx, conv, CRM_CONV_ID)
+    yield runtime, ctx, conv
+    await ctx.crm.aclose()
+
+
+@pytest.fixture
+async def runtime_con_dueno_ctx():
+    """Mismo escenario que runtime_y_ctx, pero con OWNER_WA_ID configurado —
+    book_session debe crear un pending_booking en vez de reservar directo."""
+    ctx = make_ctx(settings=make_settings(owner_wa_id=OWNER_ID))
     conv = await ctx.store.get_or_create_conversation(IDENTITY)
     await ctx.store.replace_offered_slots(
         conv.id,
@@ -122,6 +153,46 @@ async def test_book_rechaza_direccion_vacia(runtime_y_ctx):
     assert result["error"] == "direccion_incompleta"
     assert ctx.calendar.booking_calls == []
     assert runtime.booked is False
+
+
+async def test_book_con_dueno_no_reserva_directo_crea_pendiente(
+    runtime_con_dueno_ctx, respx_mock
+):
+    """Con OWNER_WA_ID configurado, book_session ya NO llama a Google
+    Calendar directo -- crea un pending_booking y le avisa al dueño por
+    WhatsApp (folio), y el lead recibe un mensaje de "voy a confirmar con el
+    equipo", nunca una confirmación definitiva."""
+    runtime, ctx, conv = runtime_con_dueno_ctx
+    respx_mock.get(f"{CRM_URL}/api/bot/context", params={"waIdentity": OWNER_ID}).mock(
+        return_value=httpx.Response(200, json=crm_context(conv_id="cv_owner"))
+    )
+    owner_msg_route = respx_mock.post(f"{CRM_URL}/api/bot/messages").mock(
+        return_value=httpx.Response(200, json={"messageId": "msg_1"})
+    )
+    result = await runtime.execute(
+        "book_session",
+        {
+            "start_utc": SLOT_ISO,
+            "dia_confirmado": "lunes a las 10",
+            "direccion_completa": DIRECCION_OK,
+        },
+    )
+    assert result["ok"] is True
+    assert result["pendiente_aprobacion"] is True
+    assert ctx.calendar.booking_calls == []  # nunca tocó la agenda real
+    assert runtime.booked is False
+
+    pendientes = await ctx.store.list_pending_bookings_pendientes()
+    assert len(pendientes) == 1
+    assert pendientes[0].direccion == DIRECCION_OK
+    assert pendientes[0].crm_conversation_id == CRM_CONV_ID
+
+    body = json.loads(owner_msg_route.calls[0].request.content)
+    assert body["conversationId"] == "cv_owner"
+    assert f"#{pendientes[0].id}" in body["text"]
+
+    # los slots ofrecidos se limpian igual (evita doble-reserva del mismo lead)
+    assert await ctx.store.get_offered_slots(conv.id) == []
 
 
 async def test_book_rechaza_direccion_sin_numero(runtime_y_ctx):

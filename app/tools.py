@@ -14,6 +14,7 @@ import re
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
+from app.approvals import enviar_solicitud_aprobacion, next_reminder
 from app.crm import CrmError
 from app.gcal import SERVICE_RULES, CalendarError, CalendarSlotTaken
 from app.profile import BusinessProfile
@@ -347,10 +348,13 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
                 "start_utc debe ser EXACTAMENTE el start_utc de un slot ofrecido "
                 "en esta conversación. Llámala SOLO después de haber nombrado el "
                 "día completo y de que el lead lo aceptara sin ambigüedad, Y "
-                "después de haberle pedido la dirección completa del domicilio "
-                "(calle, número exterior, número interior si aplica, y una "
-                "referencia de acceso — timbre o si hay que llamarle al llegar) "
-                "— nunca inventes ni pongas un placeholder en direccion_completa."
+                "después de haberle pedido la dirección completa del domicilio: "
+                "calle, número exterior, número interior si aplica, colonia, "
+                "alcaldía o municipio, y una referencia de acceso (timbre o si "
+                "hay que llamarle al llegar) — es requisito para agendar, no "
+                "opcional. Un pin de ubicación de WhatsApp NO sustituye esto — "
+                "pide igual que lo escriba. Nunca inventes ni pongas un "
+                "placeholder en direccion_completa."
             ),
             "parameters": {
                 "type": "object",
@@ -370,11 +374,15 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
                     "direccion_completa": {
                         "type": "string",
                         "description": (
-                            "Calle y número exterior como mínimo (idealmente "
-                            "también número interior, colonia/alcaldía si no se "
-                            "dieron antes, y la referencia de acceso), tal cual "
-                            "las dio el lead. Si el lead todavía no las dio, NO "
-                            "llames esta función — pídeselas primero."
+                            "TODOS estos datos, tal cual los dio el lead: calle, "
+                            "número exterior, número interior (si aplica), "
+                            "colonia, alcaldía o municipio, y la referencia de "
+                            "acceso. Inclúyelos aunque colonia/alcaldía ya se "
+                            "hayan dado antes (al verificar cobertura) — debe "
+                            "quedar completa en este solo dato. Si el lead "
+                            "todavía no dio calle y número, NO llames esta "
+                            "función — pídeselos primero (un pin de ubicación no "
+                            "cuenta como haberlos dado)."
                         ),
                     },
                 },
@@ -779,16 +787,23 @@ class ToolRuntime:
                 "error": "direccion_incompleta",
                 "detalle": (
                     "Todavía no tienes la dirección completa del domicilio "
-                    "(calle y número exterior como mínimo) para que el técnico "
-                    "pueda llegar. Pídesela al lead — no la inventes ni uses un "
-                    "placeholder — y vuelve a llamar book_session cuando la "
-                    "tengas."
+                    "para que el técnico pueda llegar — es requisito para "
+                    "agendar. Pídele al lead calle, número exterior, número "
+                    "interior si aplica, colonia y alcaldía/municipio (un pin "
+                    "de ubicación no cuenta como haberlos dado) — no la "
+                    "inventes ni uses un placeholder — y vuelve a llamar "
+                    "book_session cuando la tengas completa."
                 ),
             }
         chosen, error = await self._resolve_offered(args, "book_session")
         if error is not None or chosen is None:
             return error or {"ok": False, "error": "slot_no_ofrecido"}
         end = chosen.end_utc or (chosen.start_utc + timedelta(hours=1))
+
+        owner_identity = self._ctx.settings.owner_identity
+        if owner_identity:
+            return await self._book_pendiente_aprobacion(chosen, end, direccion, args)
+
         try:
             result = await self._ctx.calendar.create_booking(
                 chosen.start_utc,
@@ -825,6 +840,42 @@ class ToolRuntime:
             "instrucciones": (
                 "confirma el día COMPLETO y la hora tal cual dice label, y "
                 "menciona lo que el negocio pida para llegar preparado"
+            ),
+        }
+
+    async def _book_pendiente_aprobacion(
+        self, chosen: OfferedSlot, end: Any, direccion: str, args: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Candado de negocio: el dueño tiene que aprobar antes de reservar
+        de verdad (ver app/approvals.py). NO llama a Google Calendar aquí."""
+        pending = await self._ctx.store.create_pending_booking(
+            self._conv.id,
+            self._crm_conv_id,
+            chosen.service_key,
+            chosen.start_utc,
+            end,
+            chosen.label,
+            direccion,
+            str(args.get("dia_confirmado") or ""),
+            next_reminder(self._ctx.settings.booking_reminder_minutes),
+        )
+        await self._ctx.store.clear_offered_slots(self._conv.id)
+        avisado = await enviar_solicitud_aprobacion(self._ctx, pending)
+        if not avisado:
+            logger.warning(
+                "tools: no pude avisarle al dueño de la cita #%s — sigue pendiente, "
+                "el reminder worker reintentará",
+                pending.id,
+            )
+        return {
+            "ok": True,
+            "pendiente_aprobacion": True,
+            "label": chosen.label,
+            "instrucciones": (
+                "NO digas que la cita ya quedó agendada — todavía falta que el "
+                "equipo confirme disponibilidad. Dile al lead algo como: 'Voy a "
+                "confirmar disponibilidad con el equipo y te aviso en breve "
+                "🙏' — sin dar el día/hora como definitivos."
             ),
         }
 
