@@ -96,9 +96,13 @@ def _evaluar_cobertura(
             "instrucciones": (
                 "El nombre de la colonia NO alcanza para confirmar cobertura: "
                 "hay colonias con el mismo nombre en distintas alcaldías o "
-                "municipios, algunas cubiertas y otras no. NO digas todavía "
-                "que está (o no) en zona de cobertura — pide el código postal "
-                "para confirmarlo."
+                "municipios, algunas cubiertas y otras no. Tu respuesta a "
+                "este mensaje debe SOLO pedir el código postal — no incluyas "
+                "ninguna frase sobre si está o no en zona de cobertura, ni "
+                "'probablemente sí', ni 'está en zona de cobertura, pero...' "
+                "(eso contradice el pedir el dato). Usa algo como: 'Para "
+                "confirmar que estás en zona de cobertura, ¿me compartes el "
+                "código postal de ese domicilio?'"
             ),
         }
     return {
