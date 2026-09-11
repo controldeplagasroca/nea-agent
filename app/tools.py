@@ -998,6 +998,11 @@ class ToolRuntime:
                 "detalle": "el lead no tiene cita por delante; usa book_session",
             }
         end = chosen.end_utc or (chosen.start_utc + timedelta(hours=1))
+
+        owner_identity = self._ctx.settings.owner_identity
+        if owner_identity:
+            return await self._reschedule_pendiente_aprobacion(active, chosen, end, args)
+
         try:
             await self._ctx.calendar.reschedule_booking(
                 active.google_event_id,
@@ -1027,6 +1032,51 @@ class ToolRuntime:
             "instrucciones": (
                 "confirma que quedó movida, con el día COMPLETO y la hora tal "
                 "cual dice label"
+            ),
+        }
+
+    async def _reschedule_pendiente_aprobacion(
+        self,
+        active: Any,
+        chosen: OfferedSlot,
+        end: Any,
+        args: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Candado de negocio: reagendar una cita YA aprobada también le pide
+        al dueño aprobar el nuevo horario antes de tocar el calendario real
+        (mismo mecanismo que _book_pendiente_aprobacion, ver app/approvals.py)."""
+        pending = await self._ctx.store.create_pending_booking(
+            self._conv.id,
+            self._crm_conv_id,
+            chosen.service_key,
+            chosen.start_utc,
+            end,
+            chosen.label,
+            "",
+            str(args.get("dia_confirmado") or ""),
+            next_reminder(self._ctx.settings.booking_reminder_minutes),
+            0.0,
+            self._conv.wa_identity,
+            kind="reagendar",
+            google_event_id=active.google_event_id,
+        )
+        await self._ctx.store.clear_offered_slots(self._conv.id)
+        avisado = await enviar_solicitud_aprobacion(self._ctx, pending)
+        if not avisado:
+            logger.warning(
+                "tools: no pude avisarle al dueño del reagendo #%s — sigue "
+                "pendiente, el reminder worker reintentará",
+                pending.id,
+            )
+        return {
+            "ok": True,
+            "pendiente_aprobacion": True,
+            "label": chosen.label,
+            "instrucciones": (
+                "NO digas que la cita ya quedó movida — todavía falta que el "
+                "equipo confirme el nuevo horario. Dile al lead algo como: "
+                "'Voy a confirmar el nuevo horario con el equipo y te aviso en "
+                "breve 🙏' — sin dar el día/hora nuevo como definitivo."
             ),
         }
 

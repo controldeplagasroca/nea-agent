@@ -73,6 +73,13 @@ def _contiene_palabra(texto: str, palabras: tuple[str, ...]) -> bool:
 def formatear_solicitud(pending: PendingBooking) -> str:
     rule = SERVICE_RULES.get(pending.service_key)
     plaga = rule.label if rule is not None else pending.service_key
+    if pending.kind == "reagendar":
+        return (
+            f"🔄 Reagendo #{pending.id} por aprobar\n"
+            f"Plaga: {plaga}\n"
+            f"Nueva fecha: {pending.label}\n\n"
+            f'Responde "sí {pending.id}" o "no {pending.id}" para confirmar o rechazar.'
+        )
     return (
         f"🐜 Cita #{pending.id} por aprobar\n"
         f"Plaga: {plaga}\n"
@@ -152,6 +159,62 @@ def _resumen_evento(pending: PendingBooking) -> str:
     return f"Visita {etiqueta} (aprobado)"
 
 
+async def _resolver_reagendo(ctx: AppContext, pending: PendingBooking) -> str:
+    """Rama de resolver_aprobacion para kind="reagendar": mueve un evento
+    YA existente en vez de crear uno nuevo (ver reschedule_session en
+    app/tools.py)."""
+    active = await ctx.store.get_active_calendar_booking(pending.conversation_id)
+    if active is None or not pending.google_event_id:
+        await ctx.store.resolve_pending_booking(pending.id, "rechazado")
+        await _notificar_lead(
+            ctx,
+            pending,
+            "No encontré tu cita original para moverla 😔 ¿Me compartes de nuevo "
+            "los datos de tu cita?",
+        )
+        return (
+            f"No encontré la cita original para el reagendo #{pending.id} — "
+            "revísalo en Calendar."
+        )
+    try:
+        await ctx.calendar.reschedule_booking(
+            pending.google_event_id,
+            active.start_utc,
+            active.end_utc,
+            pending.start_utc,
+            pending.end_utc,
+            _resumen_evento(pending),
+            f"Agendado por Nea (aprobado). Conversación CRM {pending.crm_conversation_id}.",
+            pending.service_key,
+        )
+    except CalendarSlotTaken:
+        await ctx.store.resolve_pending_booking(pending.id, "rechazado")
+        await _notificar_lead(
+            ctx,
+            pending,
+            "Justo ese horario se acaba de ocupar mientras confirmábamos 😔 "
+            "¿Buscamos otro?",
+        )
+        return (
+            f"Uy, reagendo #{pending.id}: ese horario se ocupó justo ahora — "
+            "avisé al cliente para que elija otro."
+        )
+    except CalendarError as exc:
+        logger.warning("approvals: reschedule_booking falló para #%s: %s", pending.id, exc)
+        return f"No pude mover la cita #{pending.id} en la agenda — revísalo en Calendar."
+
+    await ctx.store.update_calendar_booking_time(
+        pending.conversation_id, pending.start_utc, pending.end_utc
+    )
+    await ctx.store.resolve_pending_booking(pending.id, "aprobado")
+    await _notificar_lead(
+        ctx,
+        pending,
+        f"¡Listo! Tu cita quedó movida para {pending.label}. 🪳✅",
+    )
+    return f"Listo, reagendo #{pending.id} confirmado y avisado al cliente ✅"
+
+
 async def resolver_aprobacion(ctx: AppContext, pending: PendingBooking, aprobado: bool) -> str:
     """Ejecuta la aprobación/rechazo, avisa al lead, y regresa el texto de
     confirmación breve para el dueño."""
@@ -163,7 +226,12 @@ async def resolver_aprobacion(ctx: AppContext, pending: PendingBooking, aprobado
             "Justo esa fecha y hora no se pudo confirmar con el equipo 🙏 "
             "¿Buscamos otro horario que te acomode?",
         )
+        if pending.kind == "reagendar":
+            return f"Ok, reagendo #{pending.id} rechazado — ya avisé al cliente ❌"
         return f"Ok, cita #{pending.id} rechazada — ya avisé al cliente ❌"
+
+    if pending.kind == "reagendar":
+        return await _resolver_reagendo(ctx, pending)
 
     description = construir_description_evento(
         texto_base=f"Agendado por Nea (aprobado). Conversación CRM {pending.crm_conversation_id}.",

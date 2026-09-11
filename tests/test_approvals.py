@@ -3,7 +3,7 @@ aprobación/rechazo — ver app/approvals.py."""
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import httpx
 import pytest
@@ -213,3 +213,69 @@ async def test_resolver_aprobacion_slot_ocupado_al_aprobar_rechaza_y_avisa(
     assert resolved.estado == "rechazado"
     active = await ctx.store.get_active_calendar_booking(conv.id)
     assert active is None
+
+
+# ------------------------------------------------------ reagendar (kind) ---
+
+
+async def test_resolver_aprobacion_reagendar_mueve_el_evento_existente(
+    ctx_con_dueno, respx_mock
+):
+    """kind='reagendar': al aprobar, se mueve el evento YA existente
+    (reschedule_booking), nunca se crea uno nuevo (create_booking)."""
+    ctx, conv = ctx_con_dueno
+    old_start = START - timedelta(days=7)
+    old_end = old_start + timedelta(minutes=90)
+    await ctx.store.save_calendar_booking(conv.id, "evt_old", "alemana", old_start, old_end)
+    pending = await ctx.store.create_pending_booking(
+        conv.id, CRM_CONV_ID, "alemana", START, END,
+        "lunes 20 de julio, 10:00 am", "", "lunes a las 10", START,
+        kind="reagendar", google_event_id="evt_old",
+    )
+    lead_msg_route = respx_mock.post(f"{CRM_URL}/api/bot/messages").mock(
+        return_value=httpx.Response(200, json={"messageId": "msg_1"})
+    )
+    respuesta_dueno = await resolver_aprobacion(ctx, pending, True)
+    assert "reagendo" in respuesta_dueno.lower()
+
+    assert ctx.calendar.booking_calls == []  # nunca crea un evento nuevo
+    call = ctx.calendar.reschedule_calls[0]
+    assert call["event_id"] == "evt_old"
+    assert call["old_start"] == old_start
+    assert call["new_start"] == START
+
+    active = await ctx.store.get_active_calendar_booking(conv.id)
+    assert active.start_utc == START
+
+    resolved = await ctx.store.get_pending_booking(pending.id)
+    assert resolved.estado == "aprobado"
+
+    lead_body = json.loads(lead_msg_route.calls[-1].request.content)
+    assert "movida" in lead_body["text"].lower()
+
+
+async def test_resolver_aprobacion_reagendar_rechazado_no_mueve_avisa_al_lead(
+    ctx_con_dueno, respx_mock
+):
+    ctx, conv = ctx_con_dueno
+    old_start = START - timedelta(days=7)
+    old_end = old_start + timedelta(minutes=90)
+    await ctx.store.save_calendar_booking(conv.id, "evt_old", "alemana", old_start, old_end)
+    pending = await ctx.store.create_pending_booking(
+        conv.id, CRM_CONV_ID, "alemana", START, END,
+        "lunes 20 de julio, 10:00 am", "", "lunes a las 10", START,
+        kind="reagendar", google_event_id="evt_old",
+    )
+    respx_mock.post(f"{CRM_URL}/api/bot/messages").mock(
+        return_value=httpx.Response(200, json={"messageId": "msg_1"})
+    )
+    respuesta_dueno = await resolver_aprobacion(ctx, pending, False)
+    assert "reagendo" in respuesta_dueno.lower()
+    assert "rechazado" in respuesta_dueno.lower()
+    assert ctx.calendar.reschedule_calls == []
+
+    resolved = await ctx.store.get_pending_booking(pending.id)
+    assert resolved.estado == "rechazado"
+    # el evento viejo sigue intacto, con su horario original
+    active = await ctx.store.get_active_calendar_booking(conv.id)
+    assert active.start_utc == old_start

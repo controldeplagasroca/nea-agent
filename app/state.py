@@ -94,6 +94,8 @@ class PendingBooking:
     dia_confirmado: str
     costo_cotizado: float = 0.0
     telefono_cliente: str = ""
+    kind: str = "nueva"  # nueva (agendar) | reagendar (mover cita ya aprobada)
+    google_event_id: str | None = None  # solo kind="reagendar": evento a mover
     estado: str = "pendiente"  # pendiente | aprobado | rechazado
     reminders_sent: int = 0
     next_reminder_at: datetime = field(default_factory=utcnow)
@@ -227,6 +229,8 @@ class Store(Protocol):
         next_reminder_at: datetime,
         costo_cotizado: float = 0.0,
         telefono_cliente: str = "",
+        kind: str = "nueva",
+        google_event_id: str | None = None,
     ) -> PendingBooking: ...
     async def get_pending_booking(self, pending_id: int) -> PendingBooking | None: ...
     async def list_pending_bookings_pendientes(self) -> list[PendingBooking]: ...
@@ -428,6 +432,8 @@ class MemoryStore:
         next_reminder_at: datetime,
         costo_cotizado: float = 0.0,
         telefono_cliente: str = "",
+        kind: str = "nueva",
+        google_event_id: str | None = None,
     ) -> PendingBooking:
         pid = next(self._ids)
         pending = PendingBooking(
@@ -443,6 +449,8 @@ class MemoryStore:
             next_reminder_at=next_reminder_at,
             costo_cotizado=costo_cotizado,
             telefono_cliente=telefono_cliente,
+            kind=kind,
+            google_event_id=google_event_id,
         )
         self.pending_bookings[pid] = pending
         return pending

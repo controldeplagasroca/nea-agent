@@ -510,6 +510,48 @@ async def test_reschedule_sin_cita_manda_a_book(runtime_y_ctx):
     assert ctx.calendar.reschedule_calls == []
 
 
+async def test_reschedule_con_dueno_no_mueve_directo_crea_pendiente(
+    runtime_con_dueno_ctx, respx_mock
+):
+    """Con OWNER_WA_ID configurado, reschedule_session tampoco mueve el
+    evento directo en Google Calendar -- crea un pending_booking kind
+    'reagendar' y le avisa al dueño por WhatsApp, igual que book_session.
+    Regresión: antes reschedule_session ignoraba el candado por completo."""
+    runtime, ctx, conv = runtime_con_dueno_ctx
+    old_start = SLOT_DT - timedelta(days=7)
+    old_end = old_start + timedelta(minutes=90)
+    await ctx.store.save_calendar_booking(conv.id, "evt_old", "alemana", old_start, old_end)
+    respx_mock.get(f"{CRM_URL}/api/bot/context", params={"waIdentity": OWNER_ID}).mock(
+        return_value=httpx.Response(200, json=crm_context(conv_id="cv_owner"))
+    )
+    owner_msg_route = respx_mock.post(f"{CRM_URL}/api/bot/messages").mock(
+        return_value=httpx.Response(200, json={"messageId": "msg_1"})
+    )
+
+    result = await runtime.execute(
+        "reschedule_session",
+        {"start_utc": SLOT_ISO, "dia_confirmado": "sí, el lunes 20"},
+    )
+    assert result["ok"] is True
+    assert result["pendiente_aprobacion"] is True
+    assert ctx.calendar.reschedule_calls == []  # nunca tocó la agenda real
+    assert runtime.booked is False
+
+    # la cita activa sigue con el horario VIEJO hasta que el dueño apruebe
+    active = await ctx.store.get_active_calendar_booking(conv.id)
+    assert active.start_utc == old_start
+
+    pendientes = await ctx.store.list_pending_bookings_pendientes()
+    assert len(pendientes) == 1
+    assert pendientes[0].kind == "reagendar"
+    assert pendientes[0].google_event_id == "evt_old"
+    assert pendientes[0].start_utc == SLOT_DT
+
+    assert owner_msg_route.calls  # sí le avisó al dueño
+    body = json.loads(owner_msg_route.calls[0].request.content)
+    assert "Reagendo" in body["text"]
+
+
 async def test_cancel_borra_la_cita_y_no_es_handoff(runtime_y_ctx, respx_mock):
     """Antes esto era handoff obligado; ahora Nea cancela y solo deja aviso."""
     runtime, ctx, conv = runtime_y_ctx
