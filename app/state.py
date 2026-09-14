@@ -214,6 +214,9 @@ class Store(Protocol):
         self, conversation_id: int, start_utc: datetime, end_utc: datetime
     ) -> None: ...
     async def cancel_calendar_booking(self, conversation_id: int) -> None: ...
+    async def get_booking_by_event_id(
+        self, google_event_id: str
+    ) -> CalendarBooking | None: ...
 
     # aprobación del dueño antes de reservar (candado de negocio)
     async def create_pending_booking(
@@ -418,6 +421,14 @@ class MemoryStore:
 
     async def cancel_calendar_booking(self, conversation_id: int) -> None:
         self.calendar_bookings.pop(conversation_id, None)
+
+    async def get_booking_by_event_id(
+        self, google_event_id: str
+    ) -> CalendarBooking | None:
+        for booking in self.calendar_bookings.values():
+            if booking.google_event_id == google_event_id:
+                return booking
+        return None
 
     async def create_pending_booking(
         self,

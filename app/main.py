@@ -29,6 +29,7 @@ from app.llm import OpenAiLlm
 from app.profile import ProfileProvider
 from app.relay import RelayWorker
 from app.sender import SenderWorker
+from app.service_events import router as service_events_router
 from app.state import AppContext
 from app.turn import handle_flush
 from app.webhook import router as webhook_router
@@ -134,6 +135,7 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
     if ctx is not None:
         _wire_coalescer(ctx)
     app.include_router(webhook_router)
+    app.include_router(service_events_router)
 
     @app.get("/health")
     async def health(request: Request):  # type: ignore[no-untyped-def]

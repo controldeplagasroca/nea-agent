@@ -371,6 +371,19 @@ class PgStore:
             end_utc,
         )
 
+    async def get_booking_by_event_id(
+        self, google_event_id: str
+    ) -> CalendarBooking | None:
+        row = await self.pool.fetchrow(
+            """
+            SELECT * FROM calendar_bookings
+            WHERE google_event_id = $1 AND canceled_at IS NULL
+            ORDER BY start_utc DESC LIMIT 1
+            """,
+            google_event_id,
+        )
+        return _booking_from_row(row) if row is not None else None
+
     async def cancel_calendar_booking(self, conversation_id: int) -> None:
         await self.pool.execute(
             """

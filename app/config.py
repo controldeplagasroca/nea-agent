@@ -79,6 +79,14 @@ class Settings(BaseSettings):
     database_url: str = ""
     port: int = 8000
 
+    # Aviso entrante de cambios de servicio (POST /internal/service-events):
+    # ROCA Ops / Hermes avisan aqui cuando un servicio que Nea agendo se
+    # cancela o reagenda del otro lado (asignacion manual de tecnico,
+    # cancelacion, etc.) -- sin esto, calendar_bookings queda desactualizado
+    # y Nea puede seguir tratando como activa una cita que ya no existe.
+    # Vacio = endpoint desactivado (rechaza todo con 401).
+    service_sync_secret: str = ""
+
     # Desarrollo: loguear el JSON crudo de mensajes no-texto entrantes para
     # capturar los formatos reales de Meta (spec 002). Apagar al terminar.
     capture_payloads: bool = False
