@@ -1,22 +1,30 @@
-"""Herramientas del LLM: update_ficha, propose_slots, book_session,
-reschedule_session, cancel_session, route_out, identificar_plaga, calcular,
-handoff.
+"""Herramientas del LLM: update_ficha, propose_slots, book_session, route_out, handoff.
 
-La validación es server-side: `book_session` SOLO acepta slots previamente
-ofrecidos (tabla offered_slots, comparación por epoch exacto). Un fallo del
-CRM dentro de una tool regresa `{"ok": false, ...}` al LLM — nunca tumba el
-turno.
+Solo se reserva lo que se ofreció, y **quien manda sobre eso es el CRM**:
+Vocero guarda la oferta contra la conversación y rechaza cualquier otro
+instante. La tabla `offered_slots` de Nea es un ESPEJO de esa oferta, no una
+segunda fuente de verdad: sirve para etiquetar con el día en palabras y para
+frenar una alucinación antes de gastar un viaje de red. Si el CRM dice que un
+horario no se ofreció, el espejo está viejo y se resincroniza con lo que él
+mande.
+
+Un fallo del CRM dentro de una tool regresa `{"ok": false, ...}` al LLM —
+nunca tumba el turno.
 """
 from __future__ import annotations
 
 import logging
-import re
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timezone
 from typing import Any
+from zoneinfo import ZoneInfo
 
-from app.approvals import construir_description_evento, enviar_solicitud_aprobacion, next_reminder
-from app.crm import CrmError
-from app.gcal import SERVICE_RULES, CalendarError, CalendarSlotTaken
+from app.crm import (
+    AgendaUnavailable,
+    CrmConflict,
+    CrmError,
+    SlotNotOffered,
+    SlotTaken,
+)
 from app.profile import BusinessProfile
 from app.state import AppContext, Conversation, OfferedSlot
 
@@ -27,295 +35,13 @@ logger = logging.getLogger("nea.tools")
 # ofrecer cuando el lead pedía otro día: el catálogo reservable es más ancho
 # que el menú que se enseña.
 MAX_OFFERED = 12
+# Con `fecha`, el CRM ofrece TODAS las horas de ese día (hasta 24). El espejo
+# tiene que guardarlas todas: si guardara 12, Nea rechazaría por su cuenta la
+# hora 13 que el CRM sí ofreció.
+MAX_OFFERED_DIA = 24
 # Reparto pedido al CRM: hasta 3 huecos por día, en 5 días distintos.
 OFFER_PER_DAY = 3
 OFFER_DAYS = 5
-
-# Palabras clave documentadas por el negocio para diferenciar especie de
-# cucaracha (ver conocimiento del negocio en el CRM). Determinístico a
-# propósito: no es al LLM a quien le toca decidir esto.
-#
-# Separadas en dos categorías (tamaño/color vs. ubicación) a propósito: un
-# solo dato suelto (p.ej. "chiquita") NO basta para concluir la especie —
-# se vio en vivo que el modelo declaraba "alemana" con una sola palabra de
-# tamaño y CERO ubicación real. El candado exige una señal de CADA categoría
-# apuntando a la misma especie antes de dar el veredicto por concluyente.
-_ALEMANA_TAMANO_COLOR = ("chiquita", "chica", "pequena", "delgadita", "clara")
-_ALEMANA_UBICACION = (
-    "cocina", "estufa", "refri", "refrigerador", "microondas", "licuadora",
-    "tostadora", "tarja", "alacena", "gabinete", "electrodomestico",
-)
-_AMERICANA_TAMANO_COLOR = (
-    "grandota", "grande", "voladora", "patineta", "cucarachota", "fea",
-    "rojiza", "oscura",
-)
-_AMERICANA_UBICACION = (
-    "drenaje", "coladera", "alcantarilla", "patio", "exterior", "sotano",
-    "estacionamiento", "registro", "tuberia",
-)
-
-
-def _sin_acentos(texto: str) -> str:
-    reemplazos = str.maketrans("áéíóúñ", "aeioun")
-    return texto.translate(reemplazos)
-
-
-# Zonas fuera de cobertura, documentadas por el negocio. Determinístico a
-# propósito: un LLM chico no distingue de forma confiable entre colonias
-# homónimas de distintas alcaldías/municipios (ver _evaluar_cobertura) — se
-# vio en vivo que declaraba "está en zona de cobertura" solo por el nombre de
-# la colonia, dos veces seguidas, incluso con la regla escrita en prosa en el
-# perfil del negocio.
-def _fuera_de_cobertura(texto: str) -> bool:
-    t = _sin_acentos(texto.lower())
-    if "tepito" in t:
-        return True
-    if "ecatepec" in t:
-        return True
-    if "gustavo" in t and "madero" in t:
-        return True
-    return False
-
-
-def _evaluar_cobertura(
-    colonia: str, alcaldia_municipio: str, codigo_postal: str
-) -> dict[str, Any]:
-    if _fuera_de_cobertura(f"{colonia} {alcaldia_municipio}"):
-        return {
-            "ok": True,
-            "cobertura": "fuera_de_zona",
-            "instrucciones": (
-                "Esta ubicación NO está en zona de cobertura (Gustavo A. "
-                "Madero, Ecatepec o Tepito). Dile con amabilidad que por ahora "
-                "no dan servicio ahí — no sigas con el flujo de cotización."
-            ),
-        }
-    if not alcaldia_municipio.strip() and not codigo_postal.strip():
-        return {
-            "ok": True,
-            "cobertura": "requiere_mas_datos",
-            "instrucciones": (
-                "El nombre de la colonia NO alcanza para confirmar cobertura: "
-                "hay colonias con el mismo nombre en distintas alcaldías o "
-                "municipios, algunas cubiertas y otras no. Tu respuesta a "
-                "este mensaje debe SOLO pedir el código postal — no incluyas "
-                "ninguna frase sobre si está o no en zona de cobertura, ni "
-                "'probablemente sí', ni 'está en zona de cobertura, pero...' "
-                "(eso contradice el pedir el dato). Usa algo como: 'Para "
-                "confirmar que estás en zona de cobertura, ¿me compartes el "
-                "código postal de ese domicilio?'"
-            ),
-        }
-    return {
-        "ok": True,
-        "cobertura": "dentro_de_zona",
-        "instrucciones": "Ya puedes confirmar cobertura y seguir el flujo normal.",
-    }
-
-
-_UBICACION_PALABRAS = (
-    "colonia", "alcaldia", "delegacion", "municipio", "codigo postal",
-    "cod postal", "c.p.",
-)
-_CP_RE = re.compile(r"\b\d{5}\b")
-
-
-_CONFIRMACION_PALABRAS = (
-    "si", "sí", "va", "sale", "ese", "esa", "correcto", "confirmo",
-    "adelante", "esta bien", "está bien", "dale", "perfecto", "de acuerdo",
-)
-_HORA_RE = re.compile(r"\b\d{1,2}(:\d{2})?\s*(am|pm|hrs?|horas)?\b")
-
-
-def parece_confirmar_horario(texto: str) -> bool:
-    """Heurística server-side: ¿el mensaje del lead suena a que está
-    aceptando/eligiendo un horario ya ofrecido?
-
-    Se usa en turn.py para FORZAR la tool-call de book_session (en vez de
-    "auto") cuando además hay slots ofrecidos pendientes en la conversación.
-    En vivo (2026-09-07) el modelo, tras el lead confirmar un horario,
-    respondió "Tu cita queda agendada..." en puro texto SIN llamar
-    book_session ni una sola vez (0 requests a la API de Google Calendar en
-    ese turno) -- una alucinación de que la acción ya ocurrió cuando nunca
-    se ejecutó. Mismo patrón que verificar_cobertura: con tool_choice="auto"
-    el modelo puede simplemente no llamar la tool.
-    """
-    t = _sin_acentos(texto.lower())
-    if any(p in t for p in _CONFIRMACION_PALABRAS):
-        return True
-    return bool(_HORA_RE.search(t))
-
-
-def _direccion_incompleta(direccion: str) -> bool:
-    """Heurística server-side: ¿tiene pinta de dirección real (calle+número)?
-
-    No es exhaustiva -- solo evita el placeholder vacío/genérico que un LLM
-    podría inventar para poder rellenar un parámetro "required" del schema.
-    En vivo (2026-09-07), sin esta validación, el bot agendó una cita real
-    con SOLO colonia+alcaldía (para cobertura) y JAMÁS pidió calle, número o
-    referencia de acceso -- la instrucción en prosa ("nunca agendes sin
-    dirección completa") no bastó, mismo patrón que verificar_cobertura.
-    """
-    d = direccion.strip()
-    if len(d) < 8:
-        return True
-    return not any(ch.isdigit() for ch in d)
-
-
-def _costo_invalido(costo: Any) -> bool:
-    """¿El costo cotizado no tiene pinta de un precio real? Proxy simple:
-    debe convertir a número positivo. Rechaza vacío, None, texto no
-    numérico, 0 o negativos."""
-    try:
-        return not (float(costo) > 0)
-    except (TypeError, ValueError):
-        return True
-
-
-_DIGITOS_RE = re.compile(r"\d{2,}")
-
-
-def _direccion_reciclada_de_otro_domicilio(
-    direccion: str, direcciones_previas: list[str], texto_lead_reciente: str
-) -> bool:
-    """¿Esta dirección coincide con la de OTRA cita YA registrada en esta
-    misma conversación, sin que el lead la haya vuelto a escribir en sus
-    mensajes recientes? Señal de que se reutilizó el domicilio de una cita
-    ANTERIOR mencionada antes en la misma conversación (ej. lead que dice
-    "tengo otro domicilio..." y el modelo recicla la dirección vieja en vez
-    de pedir la nueva).
-
-    En vivo (2026-09-07) esto pasó exactamente así: el lead dio "Calle
-    Amores 123" para un domicilio, más tarde mencionó un domicilio distinto
-    dando solo el código postal (nunca la calle), y book_session igual
-    reutilizó "Calle Amores 123" -- viejo, de la cita anterior.
-    """
-    digitos_nuevos = set(_DIGITOS_RE.findall(direccion))
-    if not digitos_nuevos:
-        return False
-    digitos_previos: set[str] = set()
-    for previa in direcciones_previas:
-        digitos_previos |= set(_DIGITOS_RE.findall(previa))
-    if not (digitos_nuevos & digitos_previos):
-        return False  # no coincide con ninguna dirección anterior -- ok
-    texto = _sin_acentos(texto_lead_reciente.lower())
-    return not any(d in texto for d in digitos_nuevos)
-
-
-def requiere_verificar_cobertura(texto: str) -> bool:
-    """Heurística server-side: ¿el mensaje del lead menciona su ubicación?
-
-    Se usa en turn.py para FORZAR la tool-call de verificar_cobertura
-    (tool_choice específico) en vez de confiar en que el LLM decida llamarla
-    por su cuenta. En vivo (2026-09-06), con tool_choice="auto", el modelo
-    respondió "está en zona de cobertura" tres veces seguidas SIN llamar la
-    tool ni una sola vez, aunque estaba disponible y el chasis la exigía en
-    prosa ("SIEMPRE llámala antes de decir cualquier cosa sobre cobertura").
-    """
-    t = _sin_acentos(texto.lower())
-    if any(p in t for p in _UBICACION_PALABRAS):
-        return True
-    return bool(_CP_RE.search(t))
-
-
-def _clasificar_cucaracha(tamano_color: str, ubicacion: str) -> dict[str, Any]:
-    tc = _sin_acentos(tamano_color.lower())
-    ub = _sin_acentos(ubicacion.lower())
-    alemana_tc = any(kw in tc for kw in _ALEMANA_TAMANO_COLOR)
-    alemana_ub = any(kw in ub for kw in _ALEMANA_UBICACION)
-    americana_tc = any(kw in tc for kw in _AMERICANA_TAMANO_COLOR)
-    americana_ub = any(kw in ub for kw in _AMERICANA_UBICACION)
-    # Concluyente SOLO si tamaño/color Y ubicación apuntan a la MISMA especie
-    # — una señal sola (aunque sea clara) no cierra el candado.
-    alemana_completa = alemana_tc and alemana_ub and not (americana_tc or americana_ub)
-    americana_completa = americana_tc and americana_ub and not (alemana_tc or alemana_ub)
-    if alemana_completa:
-        return {
-            "ok": True,
-            "especie": "alemana",
-            "instrucciones": (
-                "Especie identificada: cucaracha alemana (tamaño/color Y "
-                "ubicación coinciden). Ya puedes explicar el tratamiento y, "
-                "si el lead lo pide, cotizar — usa el conocimiento del "
-                "negocio cargado para esta especie."
-            ),
-        }
-    if americana_completa:
-        return {
-            "ok": True,
-            "especie": "americana",
-            "instrucciones": (
-                "Especie identificada: cucaracha americana (tamaño/color Y "
-                "ubicación coinciden). Ya puedes explicar el tratamiento y, "
-                "si el lead lo pide, cotizar — usa el conocimiento del "
-                "negocio cargado para esta especie."
-            ),
-        }
-    tiene_alguna_senal = alemana_tc or alemana_ub or americana_tc or americana_ub
-    if not tiene_alguna_senal:
-        return {
-            "ok": True,
-            "especie": "no_concluyente",
-            "instrucciones": (
-                "No hay suficiente información para identificar la especie. "
-                "Pregunta de nuevo, con más detalle, por el tamaño/color y "
-                "por dónde exactamente la ha visto — no cotices ni agendes "
-                "todavía, y no nombres ninguna especie todavía."
-            ),
-        }
-    # Hay AL MENOS una señal pero no las dos categorías coinciden en la misma
-    # especie (falta una categoría, o se contradicen entre sí).
-    falta_ubicacion = (alemana_tc or americana_tc) and not (alemana_ub or americana_ub)
-    if falta_ubicacion:
-        pista = (
-            "Tienes tamaño/color pero falta ubicación real. Pregunta "
-            "EXACTAMENTE dónde la ha visto (p.ej. cocina/atrás del refri, o "
-            "patio/coladera) — un dato de tamaño o color solo NUNCA basta "
-            "para nombrar la especie. No cotices ni agendes todavía, y no "
-            "nombres ninguna especie todavía."
-        )
-    else:
-        pista = (
-            "Los datos no distinguen con claridad entre las dos especies "
-            "(se contradicen o falta tamaño/color). Pregunta UN detalle más "
-            "y vuelve a llamar esta herramienta — no cotices ni agendes "
-            "todavía, y no nombres ninguna especie todavía."
-        )
-    return {
-        "ok": True,
-        "especie": "ambigua" if not falta_ubicacion else "no_concluyente",
-        "instrucciones": pista,
-    }
-
-# Palabras para mapear el texto libre del LLM a una clave de
-# app.gcal.SERVICE_RULES — tolerante a como lo escriba ("cucaracha alemana",
-# "hormigas", "araña"), igual que _clasificar_cucaracha arriba.
-_SERVICIO_PALABRAS: dict[str, tuple[str, ...]] = {
-    "alemana": ("alemana",),
-    "americana": ("americana",),
-    "chinches": ("chinche",),
-    "hormiga": ("hormiga",),
-    "pulgas": ("pulga",),
-    "roedores": ("roedor", "rata", "raton"),
-    "alacran_arana": ("alacran", "arana"),
-}
-# Termita (madera seca) es "bajo consulta" — nunca se agenda sola, siempre
-# handoff. No vive en SERVICE_RULES/gcal a propósito.
-_SERVICIO_BAJO_CONSULTA = ("termita",)
-
-
-def _normalizar_servicio(texto: str) -> str | None:
-    t = _sin_acentos(texto.lower())
-    for key, palabras in _SERVICIO_PALABRAS.items():
-        if any(p in t for p in palabras):
-            return key
-    return None
-
-
-def _es_bajo_consulta(texto: str) -> bool:
-    t = _sin_acentos(texto.lower())
-    return any(p in t for p in _SERVICIO_BAJO_CONSULTA)
-
 
 TOOL_SCHEMAS: list[dict[str, Any]] = [
     {
@@ -353,29 +79,27 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
         "function": {
             "name": "propose_slots",
             "description": (
-                "Consulta la disponibilidad real de la agenda del negocio PARA "
-                "LA PLAGA YA IDENTIFICADA (cada servicio dura distinto). Te "
-                "regresa los huecos libres REPARTIDOS entre los próximos días, "
-                "cada uno con su día en palabras (hoy/mañana/nombre del día). "
-                "Ofrece al lead máximo 3, los que embonen con lo que pidió. Si "
-                "el día que pidió no aparece, es que no hay agenda ese día: "
-                "dilo. SOLO estos horarios serán reservables después. Termita "
-                "NO se agenda aquí (bajo consulta) — usa handoff para esa."
+                "Consulta la disponibilidad real de la agenda del negocio. Sin "
+                "fecha te regresa un REPARTO: unas horas de cada uno de los "
+                "próximos días, con su día en palabras (hoy/mañana/nombre del "
+                "día). Con fecha te regresa TODAS las horas libres de ese día, "
+                "o por qué no hay (cerrado, lleno, aún sin agenda). Si el lead "
+                "pide un día u hora que no viene en el reparto, consúltalo con "
+                "fecha antes de contestar. SOLO los horarios de la última "
+                "consulta con resultados serán reservables."
             ),
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "servicio": {
+                    "fecha": {
                         "type": "string",
                         "description": (
-                            "La plaga ya identificada: alemana | americana | "
-                            "chinches | hormiga | pulgas | roedores | "
-                            "alacran_arana (alacrán o araña, mismo tratamiento "
-                            "base)."
+                            "Opcional. Día concreto en AAAA-MM-DD, calculado con "
+                            "la fecha de hoy del contexto (\"el jueves de la "
+                            "próxima semana\" → su fecha)."
                         ),
                     }
                 },
-                "required": ["servicio"],
             },
         },
     },
@@ -387,14 +111,7 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
                 "Reserva la cita en uno de los horarios previamente ofrecidos. "
                 "start_utc debe ser EXACTAMENTE el start_utc de un slot ofrecido "
                 "en esta conversación. Llámala SOLO después de haber nombrado el "
-                "día completo y de que el lead lo aceptara sin ambigüedad, Y "
-                "después de haberle pedido la dirección completa del domicilio: "
-                "calle, número exterior, número interior si aplica, colonia, "
-                "alcaldía o municipio, y una referencia de acceso (timbre o si "
-                "hay que llamarle al llegar) — es requisito para agendar, no "
-                "opcional. Un pin de ubicación de WhatsApp NO sustituye esto — "
-                "pide igual que lo escriba. Nunca inventes ni pongas un "
-                "placeholder en direccion_completa."
+                "día completo y de que el lead lo aceptara sin ambigüedad."
             ),
             "parameters": {
                 "type": "object",
@@ -411,36 +128,8 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
                             "en vez de reservar."
                         ),
                     },
-                    "direccion_completa": {
-                        "type": "string",
-                        "description": (
-                            "TODOS estos datos, tal cual los dio el lead: calle, "
-                            "número exterior, número interior (si aplica), "
-                            "colonia, alcaldía o municipio, y la referencia de "
-                            "acceso. Inclúyelos aunque colonia/alcaldía ya se "
-                            "hayan dado antes (al verificar cobertura) — debe "
-                            "quedar completa en este solo dato. Si el lead "
-                            "todavía no dio calle y número, NO llames esta "
-                            "función — pídeselos primero (un pin de ubicación no "
-                            "cuenta como haberlos dado)."
-                        ),
-                    },
-                    "costo_cotizado": {
-                        "type": "number",
-                        "description": (
-                            "El precio en MXN de ESTA visita, tal cual ya lo "
-                            "cotizaste con la tool calcular (o el precio directo "
-                            "del catálogo si no requería cálculo) — nunca lo "
-                            "inventes de memoria aquí."
-                        ),
-                    },
                 },
-                "required": [
-                    "start_utc",
-                    "dia_confirmado",
-                    "direccion_completa",
-                    "costo_cotizado",
-                ],
+                "required": ["start_utc", "dia_confirmado"],
             },
         },
     },
@@ -472,20 +161,6 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
     {
         "type": "function",
         "function": {
-            "name": "cancel_session",
-            "description": (
-                "Cancela DEFINITIVAMENTE la cita YA agendada del lead (la borra "
-                "de la agenda). Llámala SOLO tras confirmar explícitamente que "
-                "quiere cancelar (no mover) y sobre CUÁL cita, si el lead pudiera "
-                "tener duda. Esto deja aviso interno para el dueño — no es un "
-                "handoff, la IA sigue activa para lo que el lead necesite después."
-            ),
-            "parameters": {"type": "object", "properties": {}},
-        },
-    },
-    {
-        "type": "function",
-        "function": {
             "name": "route_out",
             "description": (
                 "Marca al lead como no calificado (hoy). Después despídete con "
@@ -493,105 +168,6 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
                 "si existen, puerta abierta."
             ),
             "parameters": {"type": "object", "properties": {}},
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "identificar_plaga",
-            "description": (
-                "Identifica la especie de cucaracha (alemana/cocina vs. "
-                "americana/drenaje) a partir de tamaño-color y ubicación que "
-                "describió el lead. Llámala en cuanto tengas AMBOS datos, "
-                "SIEMPRE antes de cotizar o agendar cuando el lead reportó "
-                "cucarachas sin decir cuál especie. Nunca le pidas al lead "
-                "que adivine la especie él mismo — tú la identificas con lo "
-                "que te describa."
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "tamano_color": {
-                        "type": "string",
-                        "description": (
-                            "Lo que el lead dijo sobre tamaño y/o color "
-                            "(p.ej. 'chiquita cafecita', 'grande rojiza oscura')"
-                        ),
-                    },
-                    "ubicacion": {
-                        "type": "string",
-                        "description": (
-                            "Dónde el lead ha visto la plaga (p.ej. 'cocina, "
-                            "atrás del refri', 'coladera del patio')"
-                        ),
-                    },
-                },
-                "required": ["tamano_color", "ubicacion"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "verificar_cobertura",
-            "description": (
-                "Verifica determinísticamente si un domicilio está en zona de "
-                "cobertura. SIEMPRE llámala, en ESE turno, antes de decir "
-                "cualquier cosa sobre cobertura — nunca respondas de memoria "
-                "ni por el nombre de la colonia solo, ni aunque ya hayas visto "
-                "esa colonia antes en la conversación: hay colonias con el "
-                "mismo nombre en distintas alcaldías o municipios, algunas "
-                "cubiertas y otras no."
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "colonia": {
-                        "type": "string",
-                        "description": "Colonia que dio el lead, tal cual",
-                    },
-                    "alcaldia_municipio": {
-                        "type": "string",
-                        "description": (
-                            "Alcaldía o municipio SOLO si el lead lo dijo "
-                            "explícitamente (p.ej. 'Cuauhtémoc', 'Ecatepec', "
-                            "'Toluca'); cadena vacía si no lo dijo"
-                        ),
-                    },
-                    "codigo_postal": {
-                        "type": "string",
-                        "description": "Código postal si el lead ya lo dio; cadena vacía si no",
-                    },
-                },
-                "required": ["colonia", "alcaldia_municipio", "codigo_postal"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "calcular",
-            "description": (
-                "Calculadora determinista. Úsala SIEMPRE que una cotización "
-                "dependa de un cálculo — multiplicar dimensiones para sacar "
-                "metros cuadrados (largo × ancho), sumar cargos adicionales, "
-                "etc. NUNCA hagas la aritmética de memoria y luego escribas "
-                "el resultado: un error de cálculo aquí cuesta dinero real. "
-                "Llámala, lee el resultado, y úsalo para decidir el rango de "
-                "precio o el total correctos."
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "operacion": {
-                        "type": "string",
-                        "description": "multiplicar | sumar | restar",
-                    },
-                    "a": {"type": "number"},
-                    "b": {"type": "number"},
-                },
-                "required": ["operacion", "a", "b"],
-            },
         },
     },
     {
@@ -615,6 +191,78 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
         },
     },
 ]
+
+
+# Recordatorios de la cita: SOLO los manda la agenda v2 de Vocero Cloud. El
+# CRM raíz no tiene recordatorios, y con este campo obligatorio en su
+# book_session el modelo, para llenarlo, le preguntaba al lead «¿te mando un
+# recordatorio antes de la sesión?» — una promesa que nadie iba a cumplir
+# (e2e contra raíz, escenario 4). Sin la capacidad, el campo no existe.
+RECORDATORIOS_ACEPTADOS = {
+    "type": "boolean",
+    "description": (
+        "true SOLO si el lead autorizó explícitamente recibir "
+        "recordatorios de ESTA cita. Reservar o confirmar el "
+        "horario no implica permiso. Si no lo dijo o lo rechazó, false."
+    ),
+}
+
+AGENDA_V2_SCHEMAS = [
+    {"type": "function", "function": {"name": "list_bookings", "description": "Consulta las citas activas de esta conversación. Muestra sus etiquetas y pide elegir y confirmar antes de mover o cancelar. Nunca inventes una selección.", "parameters": {"type": "object", "properties": {}}}},
+    {"type": "function", "function": {"name": "cancel_session", "description": "Cancela la cita seleccionada SOLO después de confirmación explícita del cliente. Usa el selectionToken devuelto por list_bookings.", "parameters": {"type": "object", "properties": {"selection_token": {"type": "string"}, "confirmation": {"type": "boolean"}}, "required": ["selection_token", "confirmation"]}}},
+]
+
+# Herramientas que solo tienen sentido si el CRM agenda.
+AGENDA_TOOLS = frozenset({"propose_slots", "book_session", "reschedule_session"})
+
+
+def tool_schemas(agenda_enabled: bool = True, agenda_v2: bool = False, coordination: bool = False) -> list[dict[str, Any]]:
+    """El catálogo que se le ofrece al modelo en ESTE turno.
+
+    Contra un CRM sin agenda no se le enseñan las herramientas de agendar: si
+    se le enseñan, las llama, fallan todas y el lead recibe evasivas en vez de
+    un handoff limpio. Que no exista la herramienta es más claro que pedirle al
+    prompt que se acuerde de no usarla.
+    """
+    if agenda_enabled:
+        if agenda_v2:
+            import copy
+            schemas = copy.deepcopy(TOOL_SCHEMAS)
+            for tool in schemas:
+                if tool["function"]["name"] == "book_session":
+                    params = tool["function"]["parameters"]
+                    params["properties"]["recordatorios_aceptados"] = dict(RECORDATORIOS_ACEPTADOS)
+                    params["required"].append("recordatorios_aceptados")
+                if tool["function"]["name"] == "reschedule_session":
+                    params = tool["function"]["parameters"]
+                    params["properties"]["selection_token"] = {"type": "string", "description": "Token de list_bookings de la cita elegida y confirmada por el cliente"}
+                    params["required"].append("selection_token")
+            return schemas + AGENDA_V2_SCHEMAS + ([{"type": "function", "function": {"name": "coordination_consent", "description": "Registra consentimiento EXPLÍCITO para un único recordatorio de coordinación tras 24 horas sin reservar. Nunca deduzcas consentimiento por pedir una cita. consent=false si rechaza seguimiento. Solo tras ofrecer horarios.", "parameters": {"type": "object", "properties": {"consent": {"type": "boolean"}}, "required": ["consent"]}}}] if coordination else [])
+        return TOOL_SCHEMAS
+    return [
+        t
+        for t in TOOL_SCHEMAS
+        if t.get("function", {}).get("name") not in AGENDA_TOOLS
+    ]
+
+
+def _meeting(result: dict[str, Any]) -> tuple[str | None, bool]:
+    """Enlace de la reunión y si el CRM lo dejó pendiente.
+
+    Vocero devuelve `meetingLink` desde que la entrega de la reunión es un
+    conector (puede ser Zoom, Google Meet o la sala fija del negocio); antes
+    era `zoomJoinUrl`, y ese nombre se sigue aceptando para no romper un CRM
+    viejo. Leer solo el viejo hacía que el enlace llegara SIEMPRE vacío contra
+    un Vocero actual: la cita se creaba bien y el lead se quedaba sin por dónde
+    entrar.
+
+    `linkPending` es lo que evita prometer de más: la cita existe pero el
+    proveedor todavía no entregó el enlace, así que se confirma la cita y se
+    dice que el enlace llega en un momento.
+    """
+    link = result.get("meetingLink") or result.get("zoomJoinUrl")
+    pending = bool(result.get("linkPending"))
+    return (str(link) if link else None), pending
 
 
 def _iso_z(dt: datetime) -> str:
@@ -646,14 +294,56 @@ def _label_of(raw: dict[str, Any], start: datetime) -> str:
     return str(raw.get("label") or _iso_z(start))
 
 
+def _fecha_pedida(value: Any) -> str | None:
+    """AAAA-MM-DD válida, o None. El modelo a veces manda "jueves" o "17/09"."""
+    texto = str(value or "").strip()
+    try:
+        return date.fromisoformat(texto).isoformat() if len(texto) == 10 else None
+    except ValueError:
+        return None
+
+
+def _cobertura(query: dict[str, Any] | None) -> dict[str, Any]:
+    """Qué decirle al modelo de lo que NO viene en el reparto.
+
+    Antes se le decía "esta es TODA la agenda: los días que no aparecen NO
+    tienen agenda". No era cierto —el reparto son unas horas de unos cuantos
+    días— y en Tobaxis sonó así: "la próxima semana jueves o viernes ya no
+    tienen agenda" (no se habían consultado) y "el jueves a las 11 no hay"
+    (solo veía las 3 primeras horas del día).
+    """
+    base = (
+        "Ofrécele máximo 3, con su etiqueta tal cual (día incluido), los que "
+        "embonen con lo que pidió. Esta lista es un REPARTO, no toda la agenda: "
+        "si pide un día u hora que no ves aquí, llama propose_slots con "
+        "fecha=AAAA-MM-DD ANTES de contestarle. Nunca digas que un día u hora "
+        "no tiene agenda sin haber consultado ese día."
+    )
+    if not query:
+        return {"instrucciones": base}
+    out: dict[str, Any] = {"instrucciones": base}
+    if query.get("coveredUntil"):
+        out["revisado_hasta"] = query["coveredUntil"]
+        out["instrucciones"] += (
+            f" Los días posteriores al {query['coveredUntil']} NO se revisaron."
+        )
+    if query.get("perDay"):
+        out["instrucciones"] += (
+            f" De cada día solo ves hasta {query['perDay']} horas; puede haber más."
+        )
+    if query.get("horizonEnd"):
+        out["se_agenda_hasta"] = query["horizonEnd"]
+    return out
+
+
 def _slots_from_payload(
-    conversation_id: int, raw_slots: list[dict[str, Any]], service_key: str
+    conversation_id: int,
+    raw_slots: list[dict[str, Any]],
+    limit: int = MAX_OFFERED,
 ) -> list[OfferedSlot]:
-    """Convierte slots de la agenda ({startUtc,endUtc,label}) a OfferedSlot,
-    tolerante. `service_key` es el servicio para el que se generaron —
-    book_session lo reusa tal cual para armar el evento de Google Calendar."""
+    """Convierte slots del CRM ({startUtc,endUtc,label}) a OfferedSlot, tolerante."""
     out: list[OfferedSlot] = []
-    for raw in raw_slots[:MAX_OFFERED]:
+    for raw in raw_slots[:limit]:
         start = _parse_utc(str(raw.get("startUtc") or ""))
         if start is None:
             continue
@@ -664,10 +354,17 @@ def _slots_from_payload(
                 start_utc=start,
                 end_utc=end,
                 label=_label_of(raw, start),
-                service_key=service_key,
             )
         )
     return out
+
+
+def _zona_del_negocio(ctx: AppContext) -> ZoneInfo:
+    """La zona de AGENT_TIMEZONE (la del negocio), o CDMX si no es válida."""
+    try:
+        return ZoneInfo(getattr(ctx.settings, "agent_timezone", "") or "America/Mexico_City")
+    except Exception:
+        return ZoneInfo("America/Mexico_City")
 
 
 def _slots_for_llm(slots: list[OfferedSlot]) -> list[dict[str, str]]:
@@ -691,12 +388,22 @@ class ToolRuntime:
         # Efectos observables por turn.py:
         self.handoff_reason: str | None = None  # se ejecuta DESPUÉS de la despedida
         self.booked = False
+        self.booking_confirmation: dict[str, Any] | None = None
         self.routed_out = False
         self.proposed = False
-        self.canceled = False
 
     async def execute(self, name: str, args: dict[str, Any]) -> dict[str, Any]:
         try:
+            if name == "coordination_consent" and getattr(self._ctx.crm, "supports_coordination", False):
+                if not isinstance(args.get("consent"), bool):
+                    return {"ok": False, "error": "explicit_consent_required"}
+                return await self._ctx.crm.set_coordination_consent(self._crm_conv_id, args["consent"])
+            if name == "list_bookings" and getattr(self._ctx.crm, "supports_agenda_v2", False):
+                return {"ok": True, "bookings": await self._ctx.crm.list_bookings(self._crm_conv_id)}
+            if name == "cancel_session" and getattr(self._ctx.crm, "supports_agenda_v2", False):
+                if args.get("confirmation") is not True or not args.get("selection_token"):
+                    return {"ok": False, "error": "confirmation_required"}
+                return await self._ctx.crm.cancel_booking(self._crm_conv_id, str(args["selection_token"]), True)
             if name == "update_ficha":
                 return await self._update_ficha(args)
             if name == "propose_slots":
@@ -705,16 +412,8 @@ class ToolRuntime:
                 return await self._book_session(args)
             if name == "reschedule_session":
                 return await self._reschedule_session(args)
-            if name == "cancel_session":
-                return await self._cancel_session()
             if name == "route_out":
                 return await self._route_out()
-            if name == "identificar_plaga":
-                return self._identificar_plaga(args)
-            if name == "verificar_cobertura":
-                return self._verificar_cobertura(args)
-            if name == "calcular":
-                return self._calcular(args)
             if name == "handoff":
                 return self._handoff(args)
             logger.warning("tools: herramienta desconocida %r", name)
@@ -726,13 +425,6 @@ class ToolRuntime:
                 "error": "crm_error",
                 "detalle": "no pude completar la acción; continúa la conversación o haz handoff",
             }
-        except CalendarError as exc:
-            logger.warning("tools: %s falló contra la agenda: %s", name, exc)
-            return {
-                "ok": False,
-                "error": "agenda_error",
-                "detalle": "no pude completar la acción en la agenda; continúa la conversación o haz handoff",
-            }
 
     async def _update_ficha(self, args: dict[str, Any]) -> dict[str, Any]:
         # Tolera el drift del LLM: manda lo que haya, el CRM normaliza flojo.
@@ -743,24 +435,30 @@ class ToolRuntime:
         return {"ok": True}
 
     async def _propose_slots(self, args: dict[str, Any]) -> dict[str, Any]:
-        servicio_raw = str(args.get("servicio") or "")
-        servicio = _normalizar_servicio(servicio_raw)
-        if servicio is None:
-            bajo_consulta = _es_bajo_consulta(servicio_raw)
+        fecha = _fecha_pedida(args.get("fecha"))
+        if args.get("fecha") and fecha is None:
             return {
                 "ok": False,
-                "error": "servicio_no_agendable",
-                "detalle": (
-                    "esta plaga es bajo consulta y no se agenda sola — haz "
-                    "handoff para coordinar directo"
-                    if bajo_consulta
-                    else "no reconozco ese servicio; usa una plaga del catálogo o haz handoff"
-                ),
+                "error": "fecha_invalida",
+                "detalle": "fecha va como AAAA-MM-DD (p. ej. 2026-09-17); vuelve a llamar",
             }
-        raw = await self._ctx.calendar.get_availability(
-            servicio, limit=MAX_OFFERED, per_day=OFFER_PER_DAY, days=OFFER_DAYS
-        )
-        slots = _slots_from_payload(self._conv.id, raw, servicio)
+        # La conversación va SIEMPRE: es contra ella que el CRM registra la
+        # oferta, y sin ella no hay nada reservable después.
+        try:
+            consulta = await self._ctx.crm.consultar_huecos(
+                self._crm_conv_id,
+                date=fecha,
+                limit=MAX_OFFERED,
+                per_day=OFFER_PER_DAY,
+                days=OFFER_DAYS,
+            )
+        except AgendaUnavailable:
+            return self._sin_agenda()
+        query = consulta.get("query") if isinstance(consulta.get("query"), dict) else None
+        if fecha:
+            return await self._huecos_del_dia(fecha, consulta["slots"], query)
+
+        slots = _slots_from_payload(self._conv.id, consulta["slots"])
         if not slots:
             return {
                 "ok": False,
@@ -775,11 +473,133 @@ class ToolRuntime:
             "dias_con_agenda": sorted(
                 {s.label.rsplit(",", 1)[0].strip() for s in slots}
             ),
+            **_cobertura(query),
+        }
+
+    async def _huecos_del_dia(
+        self, fecha: str, raw: list[dict[str, Any]], query: dict[str, Any] | None
+    ) -> dict[str, Any]:
+        """Un día concreto: todas sus horas, o por qué no hay ninguna.
+
+        Un CRM que no conoce `date` la ignora y devuelve el reparto de
+        siempre; eso se nota porque no regresa `query.date`. Entonces el día
+        NO se consultó, y decirle al lead "ese día no hay" sería mentirle.
+        """
+        if not query or query.get("date") != fecha:
+            return await self._dia_no_consultado(fecha, raw)
+        status = query.get("status")
+        slots = _slots_from_payload(self._conv.id, raw, limit=MAX_OFFERED_DIA)
+        if status == "available" and slots:
+            horas = [s.label.rsplit(",", 1)[-1].strip() for s in slots]
+            await self._ctx.store.replace_offered_slots(self._conv.id, slots)
+            self.proposed = True
+            return {
+                "ok": True,
+                "fecha": fecha,
+                # La lista corta de horas va aparte a propósito: en la
+                # autoprueba, con las 11:00 dentro de `slots`, el modelo
+                # contestó "a las 11 no tengo espacio". Leer "11:00" en una
+                # lista de horas no se presta a esa confusión.
+                "horas_libres": horas,
+                "slots": _slots_for_llm(slots),
+                "instrucciones": (
+                    f"horas libres del {fecha} (hora del negocio): "
+                    f"{', '.join(horas)}. Si la hora que pidió ESTÁ en esa "
+                    "lista, SÍ está libre: ofrécesela. Si no está, dilo y "
+                    "ofrécele las más cercanas de esa lista, con su etiqueta tal "
+                    "cual. Máximo 3. Para reservar usa el start_utc del slot "
+                    "(viene en UTC, no se lo digas al lead)."
+                ),
+            }
+        # Sin horas ese día. La oferta anterior se conserva (igual que en el
+        # CRM): lo que ya se le ofreció sigue siendo reservable.
+        motivo = {
+            "closed": f"el {fecha} el negocio no abre",
+            "full": f"el {fecha} ya no quedan horarios libres",
+            "past": f"el {fecha} ya pasó; confirma qué día quiso decir",
+            "beyond_horizon": (
+                f"todavía no se abre agenda para el {fecha} (se agenda hasta el "
+                f"{query.get('horizonEnd')}). Dilo así — no es que esté lleno — y "
+                "ofrécele lo más lejano que sí haya o que te escriba más cerca de la fecha"
+            ),
+        }.get(str(status), f"el {fecha} no tiene horarios libres")
+        return {
+            "ok": False,
+            "error": "dia_sin_horarios",
+            "fecha": fecha,
+            "estado": status,
+            "detalle": (
+                f"{motivo}. Díselo derecho y ofrécele otro día — NUNCA acomodes "
+                "su petición en otro día como si fuera lo mismo."
+            ),
+        }
+
+    async def _dia_no_consultado(
+        self, fecha: str, raw: list[dict[str, Any]]
+    ) -> dict[str, Any]:
+        """El CRM ignoró `fecha` (un raíz de antes de la consulta por día).
+
+        Contestó con el reparto de siempre —unas horas de unos cuantos días—
+        y lo registró como la oferta de esta conversación. En el e2e contra
+        raíz, con solo las mañanas a la vista, el agente le dijo al lead
+        «mañana solo tengo por la mañana»: eso no lo sabe nadie. Se le da lo
+        que SÍ ve, dicho como lo que es (una parte), y el espejo queda igual
+        que la oferta que el CRM acaba de registrar.
+        """
+        tz = _zona_del_negocio(self._ctx)
+        del_dia: list[OfferedSlot] = []
+        otros: list[OfferedSlot] = []
+        for crudo in raw[:MAX_OFFERED]:
+            convertido = _slots_from_payload(self._conv.id, [crudo])
+            if not convertido:
+                continue
+            slot = convertido[0]
+            dia = str(crudo.get("dayIso") or "") or slot.start_utc.astimezone(tz).strftime("%Y-%m-%d")
+            (del_dia if dia == fecha else otros).append(slot)
+        slots = del_dia + otros
+        if not slots:
+            return {
+                "ok": False,
+                "error": "consulta_por_dia_no_disponible",
+                "fecha": fecha,
+                "detalle": (
+                    f"No pude revisar el {fecha} y ahora no veo horarios. NO digas "
+                    "que ese día no hay agenda ni que está lleno: no lo sabes. "
+                    "Ofrécele que el equipo le confirme el horario (handoff)."
+                ),
+            }
+        await self._ctx.store.replace_offered_slots(self._conv.id, slots)
+        self.proposed = True
+        if del_dia:
+            horas = [s.label.rsplit(",", 1)[-1].strip() for s in del_dia]
+            visto = (
+                f"Del {fecha} veo {', '.join(horas)}, pero son solo ALGUNAS horas: "
+                "puede haber más libres ese día que no veo. "
+            )
+        else:
+            horas = []
+            visto = (
+                f"Del {fecha} no veo ninguna hora en esta lista, y eso NO quiere "
+                "decir que no haya. "
+            )
+        return {
+            "ok": True,
+            "fecha": fecha,
+            "consulta_por_dia": "no_disponible",
+            "horas_que_veo_de_ese_dia": horas,
+            "slots": _slots_for_llm(slots),
             "instrucciones": (
-                "esta es TODA la agenda abierta: los días que no aparecen aquí "
-                "NO tienen agenda, dilo en vez de mover al lead a otro día. "
-                "Ofrécele máximo 3, con su etiqueta tal cual (día incluido), "
-                "los que embonen con lo que pidió."
+                f"No pude revisar el {fecha} completo: solo veo unas horas "
+                "sueltas de unos cuantos días, NO toda la agenda. "
+                + visto
+                + "Dile qué horarios SÍ ves (máximo 3, con su etiqueta tal cual; "
+                "primero los de ese día) y pregúntale si le acomoda alguno. Si "
+                "pidió una hora o una franja que no está en la lista (la tarde, "
+                "por ejemplo), NO des a entender que ese día no la hay —ni «solo "
+                "hay en la mañana», ni «¿prefieres otro día para la tarde?»—: "
+                "ofrécele que el equipo le confirme esa hora (handoff) o revisar "
+                "otro día. NUNCA digas que ese día solo hay mañana o tarde, que a "
+                "cierta hora no hay, ni que está lleno: no lo sabes."
             ),
         }
 
@@ -828,93 +648,85 @@ class ToolRuntime:
         )
         return chosen, None
 
-    def _resumen_evento(self, service_key: str) -> str:
-        rule = SERVICE_RULES.get(service_key)
-        etiqueta = rule.label if rule is not None else service_key
-        return f"Visita {etiqueta} — {self._conv.wa_identity}"
+    def _sin_agenda(self) -> dict[str, Any]:
+        """Este CRM no tiene agenda: dejar de prometer citas, no reintentar.
+
+        No es para siempre. La bandera AGENDA se enciende y se apaga en el CRM
+        sin avisarle a Nea: se apaga en este turno y en la sonda, que vuelve a
+        preguntar cuando vence su TTL (app/agenda.py). Antes se quedaba
+        apagada hasta reiniciar el proceso. Solo llega aquí el 404 VACÍO de la
+        bandera; el que trae el sobre de error del CRM es un fallo normal de
+        la petición (ver `_agenda_apagada` en app/crm.py).
+        """
+        self._ctx.agenda_enabled = False
+        sonda = getattr(self._ctx, "agenda_sonda", None)
+        if sonda is not None:
+            sonda.marcar_apagada()
+        logger.info(
+            "tools: el CRM no expone agenda — agendamiento desactivado hasta la próxima sonda"
+        )
+        return {
+            "ok": False,
+            "error": "sin_agenda",
+            "detalle": (
+                "este negocio no agenda por aquí; no ofrezcas horarios ni "
+                "prometas cita — resuelve lo que puedas y haz handoff"
+            ),
+        }
+
+    async def _resync_offer(
+        self, exc: SlotNotOffered, accion: str
+    ) -> dict[str, Any]:
+        """El CRM no reconoce ese horario: su lista manda, la nuestra se tira.
+
+        Pasa cuando el espejo local quedó viejo — por ejemplo si el CRM
+        reemplazó la oferta por su cuenta. Antes esto caía en el `except
+        CrmError` genérico y el agente solo decía "no pude"; ahora vuelve a
+        ofrecer lo que el CRM sí tiene registrado.
+        """
+        fresh = _slots_from_payload(self._conv.id, exc.slots)
+        await self._ctx.store.replace_offered_slots(self._conv.id, fresh)
+        logger.info(
+            "tools: %s rechazado por el CRM (no ofrecido) — oferta resincronizada a %d",
+            accion,
+            len(fresh),
+        )
+        if not fresh:
+            return {
+                "ok": False,
+                "error": "slot_no_ofrecido",
+                "detalle": (
+                    "el CRM no tiene horarios ofrecidos en esta conversación; "
+                    "vuelve a llamar propose_slots antes de agendar"
+                ),
+            }
+        return {
+            "ok": False,
+            "error": "slot_no_ofrecido",
+            "detalle": (
+                "ese horario ya no está ofrecido; ofrécele estos, que son los "
+                "que el negocio tiene reservados para esta conversación"
+            ),
+            "slots": _slots_for_llm(fresh),
+        }
 
     async def _book_session(self, args: dict[str, Any]) -> dict[str, Any]:
-        direccion = str(args.get("direccion_completa") or "")
-        if _direccion_incompleta(direccion):
-            return {
-                "ok": False,
-                "error": "direccion_incompleta",
-                "detalle": (
-                    "Todavía no tienes la dirección completa del domicilio "
-                    "para que el técnico pueda llegar — es requisito para "
-                    "agendar. Pídele al lead calle, número exterior, número "
-                    "interior si aplica, colonia y alcaldía/municipio (un pin "
-                    "de ubicación no cuenta como haberlos dado) — no la "
-                    "inventes ni uses un placeholder — y vuelve a llamar "
-                    "book_session cuando la tengas completa."
-                ),
-            }
-        costo_cotizado = args.get("costo_cotizado")
-        if _costo_invalido(costo_cotizado):
-            return {
-                "ok": False,
-                "error": "costo_invalido",
-                "detalle": (
-                    "costo_cotizado falta o no es un número positivo. Usa la "
-                    "tool calcular para obtener el precio de esta visita (o el "
-                    "precio directo del catálogo si no requiere cálculo) — "
-                    "nunca lo inventes — y vuelve a llamar book_session con "
-                    "ese valor."
-                ),
-            }
-        costo_cotizado = float(costo_cotizado)
-        previas = await self._ctx.store.list_pending_bookings_for_conversation(self._conv.id)
-        if previas:
-            historial = await self._ctx.store.recent_messages(self._conv.id, 15)
-            texto_lead_reciente = " ".join(
-                m.content for m in historial if m.role == "user"
-            )
-            if _direccion_reciclada_de_otro_domicilio(
-                direccion, [p.direccion for p in previas], texto_lead_reciente
-            ):
-                return {
-                    "ok": False,
-                    "error": "direccion_repetida_sin_confirmar",
-                    "detalle": (
-                        "Esta dirección ya se usó para OTRA cita de esta misma "
-                        "conversación (probablemente un domicilio distinto que "
-                        "el lead mencionó antes) y no la volvió a escribir "
-                        "recientemente. NO asumas que es la misma: pregúntale "
-                        "de nuevo la dirección completa de ESTE domicilio "
-                        "específico (calle, número exterior, número interior "
-                        "si aplica, colonia, alcaldía) antes de reintentar."
-                    ),
-                }
         chosen, error = await self._resolve_offered(args, "book_session")
         if error is not None or chosen is None:
             return error or {"ok": False, "error": "slot_no_ofrecido"}
-        end = chosen.end_utc or (chosen.start_utc + timedelta(hours=1))
-
-        owner_identity = self._ctx.settings.owner_identity
-        if owner_identity:
-            return await self._book_pendiente_aprobacion(
-                chosen, end, direccion, costo_cotizado, args
-            )
-
-        description = construir_description_evento(
-            texto_base=f"Agendado por Nea. Conversación CRM {self._crm_conv_id}.",
-            telefono_cliente=self._conv.wa_identity,
-            direccion=direccion,
-            service_key=chosen.service_key,
-            costo=costo_cotizado,
-            crm_conversation_id=self._crm_conv_id,
-        )
         try:
-            result = await self._ctx.calendar.create_booking(
-                chosen.start_utc,
-                end,
-                self._resumen_evento(chosen.service_key),
-                description,
-                chosen.service_key,
-            )
-        except CalendarSlotTaken as exc:
+            consent = args.get("recordatorios_aceptados") is True
+            if getattr(self._ctx.crm, "supports_agenda_v2", False):
+                result = await self._ctx.crm.create_booking(
+                    self._crm_conv_id, _iso_z(chosen.start_utc), reminder_consent=consent
+                )
+            else:
+                result = await self._ctx.crm.create_booking(
+                    self._crm_conv_id, _iso_z(chosen.start_utc)
+                )
+        except SlotTaken as exc:
             # El slot se ocupó entre oferta y elección: alternativas frescas.
-            fresh = _slots_from_payload(self._conv.id, exc.slots, chosen.service_key)
+            fresh = _slots_from_payload(self._conv.id, exc.slots)
             await self._ctx.store.replace_offered_slots(self._conv.id, fresh)
             return {
                 "ok": False,
@@ -922,100 +734,79 @@ class ToolRuntime:
                 "detalle": "ese horario se acaba de ocupar; discúlpate breve y ofrece estas alternativas",
                 "slots": _slots_for_llm(fresh),
             }
+        except SlotNotOffered as exc:
+            return await self._resync_offer(exc, "book_session")
+        except AgendaUnavailable:
+            return self._sin_agenda()
         await self._ctx.store.clear_offered_slots(self._conv.id)
-        await self._ctx.store.save_calendar_booking(
-            self._conv.id, result["event_id"], chosen.service_key, chosen.start_utc, end
-        )
         self.booked = True
+        meeting_url, link_pending = _meeting(result)
+        self.booking_confirmation = {
+            "label": chosen.label or result.get("label"),
+            "meeting_url": meeting_url,
+            "link_pending": link_pending,
+            "reminder_consent": bool(result.get("reminderConsent", False)),
+        }
         try:
             await self._ctx.crm.put_ficha(
-                self._crm_conv_id,
-                {"calificado": True, "resultado": "agendo", "geo": direccion},
+                self._crm_conv_id, {"calificado": True, "resultado": "agendo"}
             )
         except CrmError as exc:  # best-effort: la cita ya existe
             logger.warning("tools: no pude actualizar ficha tras booking: %s", exc)
         return {
             "ok": True,
-            "label": chosen.label,
+            # La etiqueta del slot ofrecido trae el día en palabras; la del
+            # CRM es la corta. Se repite ESTA para que el lead lea el día.
+            "label": chosen.label or result.get("label"),
+            "meeting_url": meeting_url,
+            "enlace_pendiente": link_pending,
+            "recordatorios_activados": bool(result.get("reminderConsent", False)),
             "instrucciones": (
-                "confirma el día COMPLETO y la hora tal cual dice label, y "
-                "menciona lo que el negocio pida para llegar preparado"
+                "confirma el día COMPLETO y la hora tal cual dice label, "
+                "comparte meeting_url si viene y menciona lo que el negocio "
+                "pida para llegar preparado. Si enlace_pendiente es true, la "
+                "cita SÍ quedó: di que el enlace le llega por aquí en un "
+                "momento, no prometas uno que no tienes"
             ),
         }
 
-    async def _book_pendiente_aprobacion(
-        self,
-        chosen: OfferedSlot,
-        end: Any,
-        direccion: str,
-        costo_cotizado: float,
-        args: dict[str, Any],
-    ) -> dict[str, Any]:
-        """Candado de negocio: el dueño tiene que aprobar antes de reservar
-        de verdad (ver app/approvals.py). NO llama a Google Calendar aquí."""
-        pending = await self._ctx.store.create_pending_booking(
-            self._conv.id,
-            self._crm_conv_id,
-            chosen.service_key,
-            chosen.start_utc,
-            end,
-            chosen.label,
-            direccion,
-            str(args.get("dia_confirmado") or ""),
-            next_reminder(self._ctx.settings.booking_reminder_minutes),
-            costo_cotizado,
-            self._conv.wa_identity,
-        )
-        await self._ctx.store.clear_offered_slots(self._conv.id)
-        avisado = await enviar_solicitud_aprobacion(self._ctx, pending)
-        if not avisado:
-            logger.warning(
-                "tools: no pude avisarle al dueño de la cita #%s — sigue pendiente, "
-                "el reminder worker reintentará",
-                pending.id,
-            )
-        return {
-            "ok": True,
-            "pendiente_aprobacion": True,
-            "label": chosen.label,
-            "instrucciones": (
-                "NO digas que la cita ya quedó agendada — todavía falta que el "
-                "equipo confirme disponibilidad. Dile al lead algo como: 'Voy a "
-                "confirmar disponibilidad con el equipo y te aviso en breve "
-                "🙏' — sin dar el día/hora como definitivos."
-            ),
-        }
+    def finalize_reply(self, text: str) -> str:
+        """Booking confirmation is authoritative, not left to model wording.
+
+        El enlace se nombra neutro: la reunión la entrega un conector (Zoom,
+        Google Meet o la sala fija del negocio) y ninguno de los dos CRM dice
+        cuál — `/api/bot/bookings` manda `meetingLink` a secas y
+        `/api/brains/agenda/book` tampoco trae el proveedor del enlace (los
+        `deliveryStates` del contrato v2 son la sincronización con calendario
+        y Zoom, no de dónde es el enlace). Decir "Zoom" a quien le llegó un
+        Meet es justo la clase de dato inventado que el agente no dice.
+        """
+        data = self.booking_confirmation
+        if not data:
+            return text
+        label = data.get("label") or "el horario acordado"
+        parts = [f"Listo, tu cita quedó confirmada para {label}."]
+        if data.get("meeting_url"):
+            parts.append(f"Enlace de la reunión: {data['meeting_url']}")
+        elif data.get("link_pending"):
+            parts.append("El enlace de la videollamada te llegará por aquí en un momento.")
+        if data.get("reminder_consent"):
+            parts.append("También quedaron activados los recordatorios que autorizaste.")
+        return "\n\n".join(parts)
 
     async def _reschedule_session(self, args: dict[str, Any]) -> dict[str, Any]:
         chosen, error = await self._resolve_offered(args, "reschedule_session")
         if error is not None or chosen is None:
             return error or {"ok": False, "error": "slot_no_ofrecido"}
-        active = await self._ctx.store.get_active_calendar_booking(self._conv.id)
-        if active is None:
-            return {
-                "ok": False,
-                "error": "sin_cita",
-                "detalle": "el lead no tiene cita por delante; usa book_session",
-            }
-        end = chosen.end_utc or (chosen.start_utc + timedelta(hours=1))
-
-        owner_identity = self._ctx.settings.owner_identity
-        if owner_identity:
-            return await self._reschedule_pendiente_aprobacion(active, chosen, end, args)
-
         try:
-            await self._ctx.calendar.reschedule_booking(
-                active.google_event_id,
-                active.start_utc,
-                active.end_utc,
-                chosen.start_utc,
-                end,
-                self._resumen_evento(chosen.service_key),
-                f"Agendado por Nea. Conversación CRM {self._crm_conv_id}.",
-                chosen.service_key,
-            )
-        except CalendarSlotTaken as exc:
-            fresh = _slots_from_payload(self._conv.id, exc.slots, chosen.service_key)
+            if getattr(self._ctx.crm, "supports_agenda_v2", False):
+                if not args.get("selection_token"):
+                    return {"ok": False, "error": "selection_required", "detalle": "consulta list_bookings y pide elegir la cita antes de mover"}
+                result = await self._ctx.crm.reschedule_booking(self._crm_conv_id, _iso_z(chosen.start_utc), selection_token=str(args["selection_token"]))
+            else:
+                result = await self._ctx.crm.reschedule_booking(self._crm_conv_id, _iso_z(chosen.start_utc))
+        except SlotTaken as exc:
+            fresh = _slots_from_payload(self._conv.id, exc.slots)
             await self._ctx.store.replace_offered_slots(self._conv.id, fresh)
             return {
                 "ok": False,
@@ -1023,90 +814,30 @@ class ToolRuntime:
                 "detalle": "ese horario se acaba de ocupar; discúlpate breve y ofrece estas alternativas",
                 "slots": _slots_for_llm(fresh),
             }
+        except SlotNotOffered as exc:
+            return await self._resync_offer(exc, "reschedule_session")
+        except AgendaUnavailable:
+            return self._sin_agenda()
+        except CrmConflict as exc:
+            if exc.code == "no_booking":
+                return {
+                    "ok": False,
+                    "error": "sin_cita",
+                    "detalle": "el lead no tiene cita por delante; usa book_session",
+                }
+            raise
         await self._ctx.store.clear_offered_slots(self._conv.id)
-        await self._ctx.store.update_calendar_booking_time(self._conv.id, chosen.start_utc, end)
         self.booked = True
         return {
             "ok": True,
-            "label": chosen.label,
+            "label": chosen.label or result.get("label"),
+            "meeting_url": _meeting(result)[0],
+            "enlace_pendiente": _meeting(result)[1],
             "instrucciones": (
                 "confirma que quedó movida, con el día COMPLETO y la hora tal "
-                "cual dice label"
+                "cual dice label; el link de la videollamada sigue siendo el "
+                "mismo salvo que aquí venga otro"
             ),
-        }
-
-    async def _reschedule_pendiente_aprobacion(
-        self,
-        active: Any,
-        chosen: OfferedSlot,
-        end: Any,
-        args: dict[str, Any],
-    ) -> dict[str, Any]:
-        """Candado de negocio: reagendar una cita YA aprobada también le pide
-        al dueño aprobar el nuevo horario antes de tocar el calendario real
-        (mismo mecanismo que _book_pendiente_aprobacion, ver app/approvals.py)."""
-        pending = await self._ctx.store.create_pending_booking(
-            self._conv.id,
-            self._crm_conv_id,
-            chosen.service_key,
-            chosen.start_utc,
-            end,
-            chosen.label,
-            "",
-            str(args.get("dia_confirmado") or ""),
-            next_reminder(self._ctx.settings.booking_reminder_minutes),
-            0.0,
-            self._conv.wa_identity,
-            kind="reagendar",
-            google_event_id=active.google_event_id,
-        )
-        await self._ctx.store.clear_offered_slots(self._conv.id)
-        avisado = await enviar_solicitud_aprobacion(self._ctx, pending)
-        if not avisado:
-            logger.warning(
-                "tools: no pude avisarle al dueño del reagendo #%s — sigue "
-                "pendiente, el reminder worker reintentará",
-                pending.id,
-            )
-        return {
-            "ok": True,
-            "pendiente_aprobacion": True,
-            "label": chosen.label,
-            "instrucciones": (
-                "NO digas que la cita ya quedó movida — todavía falta que el "
-                "equipo confirme el nuevo horario. Dile al lead algo como: "
-                "'Voy a confirmar el nuevo horario con el equipo y te aviso en "
-                "breve 🙏' — sin dar el día/hora nuevo como definitivo."
-            ),
-        }
-
-    async def _cancel_session(self) -> dict[str, Any]:
-        active = await self._ctx.store.get_active_calendar_booking(self._conv.id)
-        if active is None:
-            return {
-                "ok": False,
-                "error": "sin_cita",
-                "detalle": "el lead no tiene cita por delante que cancelar",
-            }
-        await self._ctx.calendar.cancel_booking(active.google_event_id)
-        await self._ctx.store.clear_offered_slots(self._conv.id)
-        await self._ctx.store.cancel_calendar_booking(self._conv.id)
-        self.canceled = True
-        try:
-            # No es handoff (la IA sigue activa): queda como nota en la ficha
-            # del lead para que el dueño la vea, igual que route_out.
-            await self._ctx.crm.put_ficha(
-                self._crm_conv_id,
-                {
-                    "resultado": "cancelo",
-                    "notas": "Cita cancelada por el lead vía WhatsApp.",
-                },
-            )
-        except CrmError as exc:  # best-effort: la cita ya se borró de la agenda
-            logger.warning("tools: no pude anotar la cancelación en ficha: %s", exc)
-        return {
-            "ok": True,
-            "instrucciones": "confirma al lead que la cita quedó cancelada, sin pedir motivo si ya lo dio",
         }
 
     async def _route_out(self) -> dict[str, Any]:
@@ -1121,38 +852,6 @@ class ToolRuntime:
             out["recursos"] = self._profile.resources
             out["instrucciones"] = "comparte estos recursos al despedirte, puerta abierta"
         return out
-
-    def _identificar_plaga(self, args: dict[str, Any]) -> dict[str, Any]:
-        tamano_color = str(args.get("tamano_color") or "")
-        ubicacion = str(args.get("ubicacion") or "")
-        return _clasificar_cucaracha(tamano_color, ubicacion)
-
-    def _verificar_cobertura(self, args: dict[str, Any]) -> dict[str, Any]:
-        colonia = str(args.get("colonia") or "")
-        alcaldia_municipio = str(args.get("alcaldia_municipio") or "")
-        codigo_postal = str(args.get("codigo_postal") or "")
-        return _evaluar_cobertura(colonia, alcaldia_municipio, codigo_postal)
-
-    def _calcular(self, args: dict[str, Any]) -> dict[str, Any]:
-        try:
-            a = float(args.get("a"))  # type: ignore[arg-type]
-            b = float(args.get("b"))  # type: ignore[arg-type]
-        except (TypeError, ValueError):
-            return {"ok": False, "error": "operandos_invalidos"}
-        operacion = str(args.get("operacion") or "").strip().lower()
-        if operacion in ("multiplicar", "multiplicacion", "×", "x", "*"):
-            resultado = a * b
-        elif operacion in ("sumar", "suma", "+"):
-            resultado = a + b
-        elif operacion in ("restar", "resta", "-"):
-            resultado = a - b
-        else:
-            return {"ok": False, "error": "operacion_no_reconocida"}
-        # Entero cuando cae exacto (p.ej. 5x10 -> 50, no 50.0) — más natural
-        # de leer para el LLM y de escribir al lead.
-        if resultado == int(resultado):
-            resultado = int(resultado)
-        return {"ok": True, "resultado": resultado}
 
     def _handoff(self, args: dict[str, Any]) -> dict[str, Any]:
         self.handoff_reason = str(args.get("reason") or "lead_request")

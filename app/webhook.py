@@ -3,10 +3,12 @@
 Reglas duras:
 - El POST responde 200 en <1 s SIEMPRE; el procesamiento es asíncrono.
 - Firma `x-hub-signature-256` verificada si META_APP_SECRET está configurado
-  (inválida o ausente → 401). Sin secret → se acepta (dev).
+  (inválida o ausente → 401). Sin secret → se rechaza.
 - El body crudo se encola para el relay al CRM ANTES de cualquier parseo.
 - Dedup por `wa_message_id` (INSERT ... ON CONFLICT como gate atómico).
-- Identidad: `msg.from` o `msg.from_user_id` (BSUID). Sin ninguna → log + descarte.
+- Identidad: la misma forma en que el CRM guarda al contacto — el teléfono
+  canónico, o `bsuid:<id>` si Meta solo manda el BSUID (`identidad_del_mensaje`).
+  Sin ninguna → log + descarte.
 """
 from __future__ import annotations
 
@@ -21,6 +23,7 @@ from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse, PlainTextResponse
 
 from app.config import canonical_identity
+from app.http_limits import limited_body
 from app.state import AppContext, InboundMessage
 
 logger = logging.getLogger("nea.webhook")
@@ -34,7 +37,7 @@ _bg_tasks: set[asyncio.Task[None]] = set()
 def verify_signature(body: bytes, header: str | None, secret: str | None) -> bool:
     """HMAC-SHA256 del body crudo contra el app secret de Meta."""
     if not secret:
-        return True  # sin secret configurado no se exige firma (dev)
+        return False
     if not header or not header.startswith("sha256="):
         return False
     expected = hmac.new(secret.encode("utf-8"), body, hashlib.sha256).hexdigest()
@@ -73,6 +76,40 @@ def capture_nontext(payload: dict[str, Any]) -> int:
     return captured
 
 
+# El prefijo con el que el CRM guarda a un contacto que solo tiene BSUID
+# (vocero-crm, src/server/inbox/identity.ts: BSUID_PREFIX).
+BSUID_PREFIX = "bsuid:"
+
+
+def identidad_del_mensaje(msg: dict[str, Any], contacts: list[Any]) -> str | None:
+    """Quién escribió, en la MISMA forma en que el CRM guarda al contacto.
+
+    Espejo de `resolveIdentity` del CRM: con teléfono (`from`), el teléfono
+    canónico (521→52 MX); sin teléfono —quien usa nombre de usuario en
+    WhatsApp y Meta solo identifica por su BSUID—, `bsuid:<id>`, sacado de
+    `from_user_id` o, si no viene, del primer `user_id` de `contacts`.
+
+    Nea usaba el BSUID pelón y el CRM lo guarda con prefijo: `/api/bot/context`
+    daba 404 y a ese lead nunca se le contestaba. Canónica desde el origen:
+    coalesce, BD, allowlist y seguimiento heredan la misma.
+    """
+    telefono = msg.get("from")
+    if telefono:
+        return canonical_identity(str(telefono))
+    bsuid = msg.get("from_user_id") or next(
+        (
+            c.get("user_id")
+            for c in contacts
+            if isinstance(c, dict) and c.get("user_id")
+        ),
+        None,
+    )
+    if not bsuid:
+        return None
+    bsuid = str(bsuid).strip()
+    return bsuid if bsuid.startswith(BSUID_PREFIX) else f"{BSUID_PREFIX}{bsuid}"
+
+
 def extract_inbound(payload: dict[str, Any]) -> list[InboundMessage]:
     """Parseo tolerante del payload de Meta. Nunca truena por formato raro."""
     out: list[InboundMessage] = []
@@ -92,14 +129,10 @@ def extract_inbound(payload: dict[str, Any]) -> list[InboundMessage]:
                 if not isinstance(msg, dict):
                     continue
                 # Identidad resiliente: teléfono o BSUID — jamás truena sin wa_id.
-                # Canónica desde el origen (521→52 MX): el CRM guarda contactos
-                # así y todo lo demás (coalesce, BD, followup) hereda la misma.
-                identity = msg.get("from") or msg.get("from_user_id")
-                if identity:
-                    identity = canonical_identity(str(identity))
+                identity = identidad_del_mensaje(msg, contacts)
                 if not identity:
                     logger.warning(
-                        "mensaje %s sin identidad (ni from ni from_user_id) — descartado",
+                        "mensaje %s sin identidad (ni from ni BSUID) — descartado",
                         msg.get("id"),
                     )
                     continue
@@ -175,7 +208,7 @@ async def verify(request: Request) -> PlainTextResponse:
 async def receive(request: Request) -> Any:
     """200 inmediato; todo el trabajo real corre en una tarea de fondo."""
     ctx: AppContext = request.app.state.ctx
-    body = await request.body()
+    body = await limited_body(request)
     signature = request.headers.get("x-hub-signature-256")
     if not verify_signature(body, signature, ctx.settings.meta_app_secret or None):
         logger.warning("firma inválida o ausente en el webhook — 401")
@@ -251,8 +284,10 @@ async def _early_typing(ctx: AppContext, identity: str) -> None:
         conv = await ctx.store.get_or_create_conversation(identity)
         if not conv.crm_conversation_id:
             return
-        # Conversación ya cerrada por falta de rumbo: no va a haber respuesta,
-        # así que un "escribiendo…" sería justo la mentira que este gate evita.
+        # Conversación ya cerrada por falta de rumbo: al relleno no se le
+        # contesta, y un "escribiendo…" sería justo la mentira que este gate
+        # evita. Si el mensaje trae contenido y la reabre, el "escribiendo…"
+        # lo manda el turno, ya reabierta.
         if conv.stalled_at is not None:
             return
         await ctx.crm.post_typing(str(conv.crm_conversation_id))

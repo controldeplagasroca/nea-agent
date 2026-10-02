@@ -4,37 +4,40 @@ Implementa el protocolo `Store` de app/state.py contra Postgres.
 """
 from __future__ import annotations
 
+import json
 import logging
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 import asyncpg
+from app.dispatch_store import PgDispatchStore
 
 from app.state import (
+    COLUMNAS_DE_CONVERSACION,
     BotMessage,
-    CalendarBooking,
     Conversation,
     OfferedSlot,
-    PendingBooking,
     PendingSend,
     RelayItem,
+    RelayStats,
 )
 
 logger = logging.getLogger("nea.db")
 
-_CONV_COLUMNS = frozenset(
-    {
-        "crm_conversation_id",
-        "phase",
-        "greeted",
-        "media_notice_sent",
-        "followup_due_at",
-        "followup_sent",
-        "last_inbound_at",
-        "stalled_at",
-    }
-)
+# La misma lista que usa MemoryStore (ver app/state.py).
+_CONV_COLUMNS = COLUMNAS_DE_CONVERSACION
+
+
+def _caso_de(valor: Any) -> dict[str, Any]:
+    """`bot_conversation.caso` (JSONB) → dict. asyncpg lo entrega como texto."""
+    if isinstance(valor, dict):
+        return valor
+    try:
+        dato = json.loads(valor) if valor else {}
+    except (TypeError, ValueError):
+        return {}
+    return dato if isinstance(dato, dict) else {}
 
 
 def _conv_from_row(row: asyncpg.Record) -> Conversation:
@@ -49,45 +52,71 @@ def _conv_from_row(row: asyncpg.Record) -> Conversation:
         followup_sent=row["followup_sent"],
         last_inbound_at=row["last_inbound_at"],
         stalled_at=row["stalled_at"],
+        stall_since_message_id=row["stall_since_message_id"],
+        organization_id=row["organization_id"],
+        organization_slug=row["organization_slug"],
+        caso=_caso_de(row["caso"]),
     )
 
 
-def _pending_from_row(row: asyncpg.Record) -> PendingBooking:
-    return PendingBooking(
+def _relay_desde_fila(row: Any) -> RelayItem:
+    """Una fila de `relay_queue` → su dataclass.
+
+    `relay_queue` NO tiene columnas de organización, y no le hacen falta: el
+    relay solo existe en el modo de siempre (en cloud el CRM ya tiene el
+    mensaje), y ahí la organización es la única que hay.
+
+    Desde 95549c8 este mapeo leía `organization_id`/`organization_slug` —se
+    copiaron aquí junto con los de `pending_send`— y reventaba con `KeyError`
+    en la primera fila pendiente. `RelayWorker.run` se tragaba la excepción
+    cada 5 s: ningún entrante llegaba a la bandeja del CRM, los estados de
+    entrega no se actualizaban y, con un contacto nuevo, `/api/bot/context`
+    daba 404 y Nea no contestaba. Las pruebas no lo vieron porque usaban
+    `MemoryStore`; ahora `tests/test_pg_store.py` lo corre contra Postgres.
+    """
+    return RelayItem(
+        id=row["id"],
+        body=bytes(row["body"]),
+        signature=row["signature"],
+        attempts=row["attempts"],
+        created_at=row["created_at"],
+        next_retry_at=row["next_retry_at"],
+        delivered_at=row["delivered_at"],
+        abandoned_at=row["abandoned_at"],
+        last_error_at=row["last_error_at"],
+    )
+
+
+def _pending_send_desde_fila(row: Any) -> PendingSend:
+    """Una fila de `pending_send` → su dataclass.
+
+    Existe como función, y no suelto dentro de la consulta, por el fallo que
+    arregla: el mapeo iba campo a campo y se quedó SIN LEER las columnas de
+    organización que 004 había añadido. La fila las guardaba bien; al releerla
+    volvían vacías, así que el SenderWorker no sabía de quién era el envío y no
+    entregaba ninguno. La cola de "jamás se descarta" estaba muerta.
+
+    Las pruebas no lo vieron porque `MemoryStore` devuelve el objeto que
+    guardó: ahí no hay mapeo que equivocar. El único sitio donde este error
+    existe es el que las pruebas no tocan.
+    """
+    return PendingSend(
         id=row["id"],
         conversation_id=row["conversation_id"],
         crm_conversation_id=row["crm_conversation_id"],
-        service_key=row["service_key"],
-        start_utc=row["start_utc"],
-        end_utc=row["end_utc"],
-        label=row["label"],
-        direccion=row["direccion"],
-        dia_confirmado=row["dia_confirmado"],
-        costo_cotizado=float(row["costo_cotizado"]),
-        telefono_cliente=row["telefono_cliente"],
-        kind=row["kind"],
-        google_event_id=row["google_event_id"],
-        estado=row["estado"],
-        reminders_sent=row["reminders_sent"],
-        next_reminder_at=row["next_reminder_at"],
+        content=row["content"],
+        attempts=row["attempts"],
         created_at=row["created_at"],
-        resolved_at=row["resolved_at"],
+        next_retry_at=row["next_retry_at"],
+        delivered_at=row["delivered_at"],
+        abandoned_at=row["abandoned_at"],
+        organization_id=row["organization_id"],
+        organization_slug=row["organization_slug"],
+        dispatch_id=row["dispatch_id"],
     )
 
 
-def _booking_from_row(row: asyncpg.Record) -> CalendarBooking:
-    return CalendarBooking(
-        id=row["id"],
-        conversation_id=row["conversation_id"],
-        google_event_id=row["google_event_id"],
-        service_key=row["service_key"],
-        start_utc=row["start_utc"],
-        end_utc=row["end_utc"],
-        created_at=row["created_at"],
-    )
-
-
-class PgStore:
+class PgStore(PgDispatchStore):
     """Store respaldado por Postgres (asyncpg)."""
 
     def __init__(self, dsn: str) -> None:
@@ -145,19 +174,7 @@ class PgStore:
             """,
             now,
         )
-        return [
-            RelayItem(
-                id=r["id"],
-                body=bytes(r["body"]),
-                signature=r["signature"],
-                attempts=r["attempts"],
-                created_at=r["created_at"],
-                next_retry_at=r["next_retry_at"],
-                delivered_at=r["delivered_at"],
-                abandoned_at=r["abandoned_at"],
-            )
-            for r in rows
-        ]
+        return [_relay_desde_fila(r) for r in rows]
 
     async def mark_relay_delivered(self, relay_id: int) -> None:
         await self.pool.execute(
@@ -173,22 +190,98 @@ class PgStore:
         self, relay_id: int, attempts: int, next_retry_at: datetime
     ) -> None:
         await self.pool.execute(
-            "UPDATE relay_queue SET attempts = $2, next_retry_at = $3 WHERE id = $1",
+            # Solo se reprograma tras una entrega fallida: es el último error.
+            """
+            UPDATE relay_queue
+            SET attempts = $2, next_retry_at = $3, last_error_at = now()
+            WHERE id = $1
+            """,
             relay_id,
             attempts,
             next_retry_at,
         )
 
-    # ----------------------------------------------------- conversaciones ---
+    async def relay_pendiente_con(self, marcas: list[str]) -> bool:
+        # La cola pendiente es corta (lo demás está entregado o abandonado) y
+        # el índice parcial de 001 la encuentra sin recorrer la tabla.
+        for marca in marcas:
+            if not marca:
+                continue
+            hay = await self.pool.fetchval(
+                """
+                SELECT EXISTS (
+                  SELECT 1 FROM relay_queue
+                  WHERE delivered_at IS NULL AND abandoned_at IS NULL
+                    AND position($1::bytea IN body) > 0
+                )
+                """,
+                marca.encode(),
+            )
+            if hay:
+                return True
+        return False
 
-    async def get_or_create_conversation(self, wa_identity: str) -> Conversation:
+    async def adelantar_relays(self, now: datetime) -> int:
+        estado = await self.pool.execute(
+            """
+            UPDATE relay_queue SET next_retry_at = $1
+            WHERE delivered_at IS NULL AND abandoned_at IS NULL AND next_retry_at > $1
+            """,
+            now,
+        )
+        return int(str(estado).rsplit(" ", 1)[-1] or 0)
+
+    async def relay_stats(self) -> RelayStats:
+        # Los dos índices parciales (el de la cola y el de 007) dejan contestar
+        # sin recorrer la tabla, que no se purga: /health corre cada 30 s. La
+        # edad se calcula con el reloj de Postgres, el mismo de `created_at`.
         row = await self.pool.fetchrow(
             """
-            INSERT INTO bot_conversation (wa_identity) VALUES ($1)
-            ON CONFLICT (wa_identity) DO UPDATE SET updated_at = now()
+            SELECT
+              count(*) AS pendientes,
+              floor(EXTRACT(EPOCH FROM now() - min(created_at)))::bigint
+                AS mas_viejo_segundos,
+              (SELECT max(last_error_at) FROM relay_queue
+                WHERE last_error_at IS NOT NULL) AS ultimo_error_en
+            FROM relay_queue
+            WHERE delivered_at IS NULL AND abandoned_at IS NULL
+            """
+        )
+        assert row is not None
+        edad = row["mas_viejo_segundos"]
+        return RelayStats(
+            pendientes=row["pendientes"],
+            mas_viejo_segundos=max(0, int(edad)) if edad is not None else None,
+            ultimo_error_en=row["ultimo_error_en"],
+        )
+
+    # ----------------------------------------------------- conversaciones ---
+
+    async def get_or_create_conversation(
+        self,
+        wa_identity: str,
+        organization_id: str = "",
+        organization_slug: str = "",
+    ) -> Conversation:
+        # El conflicto se resuelve contra (organization_id, wa_identity): la
+        # identidad sola dejó de identificar una conversación en cuanto una
+        # Nea atiende a varios negocios. Ver migrations/004_multiorg.sql.
+        #
+        # El slug se refresca en cada choque porque puede cambiar (un miembro
+        # renombra su subdominio) mientras el id no; guardarlo desactualizado
+        # haría que el worker de fondo hablara con una cabecera vieja.
+        row = await self.pool.fetchrow(
+            """
+            INSERT INTO bot_conversation
+              (wa_identity, organization_id, organization_slug)
+            VALUES ($1, $2, $3)
+            ON CONFLICT (organization_id, wa_identity) DO UPDATE
+              SET updated_at = now(), organization_slug = EXCLUDED.organization_slug
             RETURNING *
             """,
             wa_identity,
+            organization_id,
+            organization_slug,
         )
         assert row is not None
         return _conv_from_row(row)
@@ -199,11 +292,19 @@ class PgStore:
             raise ValueError(f"columnas desconocidas en update_conversation: {unknown}")
         if not fields:
             return
-        sets = ", ".join(f"{col} = ${i + 2}" for i, col in enumerate(fields))
+        # `caso` es JSONB: viaja como texto y se convierte en la consulta.
+        sets = ", ".join(
+            f"{col} = ${i + 2}" + ("::jsonb" if col == "caso" else "")
+            for i, col in enumerate(fields)
+        )
+        valores = [
+            json.dumps(v, ensure_ascii=False, default=str) if col == "caso" else v
+            for col, v in fields.items()
+        ]
         await self.pool.execute(
             f"UPDATE bot_conversation SET {sets}, updated_at = now() WHERE id = $1",
             conversation_id,
-            *fields.values(),
+            *valores,
         )
 
     async def reset_conversation(self, conversation_id: int) -> None:
@@ -223,6 +324,7 @@ class PgStore:
                     SET phase = 'descubrimiento', greeted = FALSE,
                         media_notice_sent = FALSE, followup_due_at = NULL,
                         followup_sent = FALSE, stalled_at = NULL,
+                        caso = '{}'::jsonb,
                         updated_at = now()
                     WHERE id = $1
                     """,
@@ -286,15 +388,13 @@ class PgStore:
                 for slot in slots:
                     await conn.execute(
                         """
-                        INSERT INTO offered_slots
-                            (conversation_id, start_utc, end_utc, label, service_key)
-                        VALUES ($1, $2, $3, $4, $5)
+                        INSERT INTO offered_slots (conversation_id, start_utc, end_utc, label)
+                        VALUES ($1, $2, $3, $4)
                         """,
                         conversation_id,
                         slot.start_utc,
                         slot.end_utc,
                         slot.label,
-                        slot.service_key,
                     )
 
     async def get_offered_slots(self, conversation_id: int) -> list[OfferedSlot]:
@@ -309,7 +409,6 @@ class PgStore:
                 end_utc=r["end_utc"],
                 label=r["label"],
                 offered_at=r["offered_at"],
-                service_key=r["service_key"],
             )
             for r in rows
         ]
@@ -319,176 +418,30 @@ class PgStore:
             "DELETE FROM offered_slots WHERE conversation_id = $1", conversation_id
         )
 
-    # ----------------------------------------------------- agenda (gcal) ---
-
-    async def save_calendar_booking(
-        self,
-        conversation_id: int,
-        google_event_id: str,
-        service_key: str,
-        start_utc: datetime,
-        end_utc: datetime,
-    ) -> CalendarBooking:
-        row = await self.pool.fetchrow(
-            """
-            INSERT INTO calendar_bookings
-                (conversation_id, google_event_id, service_key, start_utc, end_utc)
-            VALUES ($1, $2, $3, $4, $5)
-            RETURNING *
-            """,
-            conversation_id,
-            google_event_id,
-            service_key,
-            start_utc,
-            end_utc,
-        )
-        assert row is not None
-        return _booking_from_row(row)
-
-    async def get_active_calendar_booking(
-        self, conversation_id: int
-    ) -> CalendarBooking | None:
-        row = await self.pool.fetchrow(
-            """
-            SELECT * FROM calendar_bookings
-            WHERE conversation_id = $1 AND canceled_at IS NULL
-            ORDER BY start_utc DESC LIMIT 1
-            """,
-            conversation_id,
-        )
-        return _booking_from_row(row) if row is not None else None
-
-    async def update_calendar_booking_time(
-        self, conversation_id: int, start_utc: datetime, end_utc: datetime
-    ) -> None:
-        await self.pool.execute(
-            """
-            UPDATE calendar_bookings SET start_utc = $2, end_utc = $3
-            WHERE conversation_id = $1 AND canceled_at IS NULL
-            """,
-            conversation_id,
-            start_utc,
-            end_utc,
-        )
-
-    async def cancel_calendar_booking(self, conversation_id: int) -> None:
-        await self.pool.execute(
-            """
-            UPDATE calendar_bookings SET canceled_at = now()
-            WHERE conversation_id = $1 AND canceled_at IS NULL
-            """,
-            conversation_id,
-        )
-
-    # -------------------------------------- aprobación del dueño (agenda) ---
-
-    async def create_pending_booking(
-        self,
-        conversation_id: int,
-        crm_conversation_id: str,
-        service_key: str,
-        start_utc: datetime,
-        end_utc: datetime,
-        label: str,
-        direccion: str,
-        dia_confirmado: str,
-        next_reminder_at: datetime,
-        costo_cotizado: float = 0.0,
-        telefono_cliente: str = "",
-        kind: str = "nueva",
-        google_event_id: str | None = None,
-    ) -> PendingBooking:
-        row = await self.pool.fetchrow(
-            """
-            INSERT INTO pending_bookings
-                (conversation_id, crm_conversation_id, service_key, start_utc,
-                 end_utc, label, direccion, dia_confirmado, next_reminder_at,
-                 costo_cotizado, telefono_cliente, kind, google_event_id)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
-            RETURNING *
-            """,
-            conversation_id,
-            crm_conversation_id,
-            service_key,
-            start_utc,
-            end_utc,
-            label,
-            direccion,
-            dia_confirmado,
-            next_reminder_at,
-            costo_cotizado,
-            telefono_cliente,
-            kind,
-            google_event_id,
-        )
-        assert row is not None
-        return _pending_from_row(row)
-
-    async def get_pending_booking(self, pending_id: int) -> PendingBooking | None:
-        row = await self.pool.fetchrow(
-            "SELECT * FROM pending_bookings WHERE id = $1", pending_id
-        )
-        return _pending_from_row(row) if row is not None else None
-
-    async def list_pending_bookings_pendientes(self) -> list[PendingBooking]:
-        rows = await self.pool.fetch(
-            "SELECT * FROM pending_bookings WHERE estado = 'pendiente' ORDER BY id"
-        )
-        return [_pending_from_row(r) for r in rows]
-
-    async def list_pending_bookings_for_conversation(
-        self, conversation_id: int
-    ) -> list[PendingBooking]:
-        rows = await self.pool.fetch(
-            "SELECT * FROM pending_bookings WHERE conversation_id = $1 ORDER BY id",
-            conversation_id,
-        )
-        return [_pending_from_row(r) for r in rows]
-
-    async def due_booking_reminders(self, now: datetime) -> list[PendingBooking]:
-        rows = await self.pool.fetch(
-            """
-            SELECT * FROM pending_bookings
-            WHERE estado = 'pendiente' AND next_reminder_at <= $1
-            ORDER BY id
-            """,
-            now,
-        )
-        return [_pending_from_row(r) for r in rows]
-
-    async def mark_booking_reminder_sent(
-        self, pending_id: int, next_reminder_at: datetime
-    ) -> None:
-        await self.pool.execute(
-            """
-            UPDATE pending_bookings
-            SET reminders_sent = reminders_sent + 1, next_reminder_at = $2
-            WHERE id = $1
-            """,
-            pending_id,
-            next_reminder_at,
-        )
-
-    async def resolve_pending_booking(self, pending_id: int, estado: str) -> None:
-        await self.pool.execute(
-            "UPDATE pending_bookings SET estado = $2, resolved_at = now() WHERE id = $1",
-            pending_id,
-            estado,
-        )
-
     # ------------------------------------------------- envíos pendientes ---
 
     async def enqueue_pending_send(
-        self, conversation_id: int, crm_conversation_id: str, content: str
+        self,
+        conversation_id: int,
+        crm_conversation_id: str,
+        content: str,
+        organization_id: str = "",
+        organization_slug: str = "",
+        dispatch_id: str = "",
     ) -> int:
         row = await self.pool.fetchrow(
             """
-            INSERT INTO pending_send (conversation_id, crm_conversation_id, content)
-            VALUES ($1, $2, $3) RETURNING id
+            INSERT INTO pending_send
+              (conversation_id, crm_conversation_id, content,
+               organization_id, organization_slug, dispatch_id)
+            VALUES ($1, $2, $3, $4, $5, $6) RETURNING id
             """,
             conversation_id,
             crm_conversation_id,
             content,
+            organization_id,
+            organization_slug,
+            dispatch_id,
         )
         assert row is not None
         return row["id"]
@@ -503,20 +456,7 @@ class PgStore:
             """,
             now,
         )
-        return [
-            PendingSend(
-                id=r["id"],
-                conversation_id=r["conversation_id"],
-                crm_conversation_id=r["crm_conversation_id"],
-                content=r["content"],
-                attempts=r["attempts"],
-                created_at=r["created_at"],
-                next_retry_at=r["next_retry_at"],
-                delivered_at=r["delivered_at"],
-                abandoned_at=r["abandoned_at"],
-            )
-            for r in rows
-        ]
+        return [_pending_send_desde_fila(r) for r in rows]
 
     async def mark_pending_send_delivered(self, pending_id: int) -> None:
         await self.pool.execute(

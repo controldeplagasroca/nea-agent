@@ -11,6 +11,8 @@ import itertools
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, Protocol
+from contextlib import AbstractAsyncContextManager
+from app.dispatch_store import DispatchJob, MemoryDispatchStore
 
 if TYPE_CHECKING:
     from app.config import Settings
@@ -18,6 +20,27 @@ if TYPE_CHECKING:
 
 def utcnow() -> datetime:
     return datetime.now(timezone.utc)
+
+
+# Lo único que `update_conversation` puede tocar. Vive aquí y no en db.py para
+# que MemoryStore rechace exactamente lo mismo que Postgres: si aceptara
+# cualquier campo, un nombre mal escrito pasaría todas las pruebas y reventaría
+# el turno en producción — la misma distancia entre pruebas y base de verdad
+# que escondió el fallo del relay.
+COLUMNAS_DE_CONVERSACION = frozenset(
+    {
+        "crm_conversation_id",
+        "phase",
+        "greeted",
+        "media_notice_sent",
+        "followup_due_at",
+        "followup_sent",
+        "last_inbound_at",
+        "stalled_at",
+        "stall_since_message_id",
+        "caso",
+    }
+)
 
 
 # ---------------------------------------------------------------- modelos ---
@@ -28,6 +51,14 @@ class Conversation:
     id: int
     wa_identity: str
     crm_conversation_id: str | None = None
+    # De quién es esta conversación. Cadena vacía = instalación de un solo
+    # negocio, que es lo que era todo antes del modo multi-organización.
+    #
+    # Importa más de lo que parece: la identidad SOLA dejó de identificar una
+    # conversación en cuanto una Nea atiende a varios negocios, porque la
+    # misma persona puede escribirle a dos.
+    organization_id: str = ""
+    organization_slug: str = ""
     phase: str = "descubrimiento"  # descubrimiento|insight|salida|agendando|cerrada
     greeted: bool = False
     media_notice_sent: bool = False
@@ -35,8 +66,14 @@ class Conversation:
     followup_sent: bool = False
     last_inbound_at: datetime | None = None
     # Puesta cuando el agente cierra por conversación sin rumbo: mientras
-    # viva, el turno guarda silencio (ver app/stall.py).
+    # viva, el relleno se contesta con silencio (ver app/stall.py).
     stalled_at: datetime | None = None
+    # El candado cuenta solo los mensajes con id mayor a este: se mueve al
+    # reabrir, para que el hilo viejo no vuelva a disparar el cierre.
+    stall_since_message_id: int = 0
+    # El expediente del vertical de plagas (app/plagas/caso.py), como JSON.
+    # Vacío fuera de ese vertical.
+    caso: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -56,51 +93,6 @@ class OfferedSlot:
     end_utc: datetime | None
     label: str
     offered_at: datetime = field(default_factory=utcnow)
-    # Clave de app.gcal.SERVICE_RULES para la que se generó este hueco — la
-    # duración/ventana ya quedó fija al ofrecerlo; book_session la reusa tal
-    # cual para armar el evento de Google Calendar.
-    service_key: str = ""
-
-
-@dataclass
-class CalendarBooking:
-    """Cita activa en Google Calendar, rastreada localmente porque el
-    calendario no sabe nada de conversation_id (reschedule_session la
-    necesita para saber qué evento mover)."""
-
-    id: int
-    conversation_id: int
-    google_event_id: str
-    service_key: str
-    start_utc: datetime
-    end_utc: datetime
-    created_at: datetime = field(default_factory=utcnow)
-
-
-@dataclass
-class PendingBooking:
-    """Cita que el lead confirmó pero que espera aprobación del dueño antes
-    de reservarse de verdad en Google Calendar (candado de negocio, no
-    técnico — ver book_session en app/tools.py)."""
-
-    id: int
-    conversation_id: int
-    crm_conversation_id: str
-    service_key: str
-    start_utc: datetime
-    end_utc: datetime
-    label: str
-    direccion: str
-    dia_confirmado: str
-    costo_cotizado: float = 0.0
-    telefono_cliente: str = ""
-    kind: str = "nueva"  # nueva (agendar) | reagendar (mover cita ya aprobada)
-    google_event_id: str | None = None  # solo kind="reagendar": evento a mover
-    estado: str = "pendiente"  # pendiente | aprobado | rechazado
-    reminders_sent: int = 0
-    next_reminder_at: datetime = field(default_factory=utcnow)
-    created_at: datetime = field(default_factory=utcnow)
-    resolved_at: datetime | None = None
 
 
 @dataclass
@@ -113,6 +105,17 @@ class RelayItem:
     next_retry_at: datetime
     delivered_at: datetime | None = None
     abandoned_at: datetime | None = None
+    # La última entrega fallida de esta fila (007). La lee /health.
+    last_error_at: datetime | None = None
+
+
+@dataclass(frozen=True)
+class RelayStats:
+    """Cómo va la cola del relay, para /health (solo modo de siempre)."""
+
+    pendientes: int  # ni entregados ni abandonados
+    mas_viejo_segundos: int | None  # edad del pendiente más viejo
+    ultimo_error_en: datetime | None  # la entrega fallida más reciente
 
 
 @dataclass
@@ -129,6 +132,14 @@ class PendingSend:
     next_retry_at: datetime
     delivered_at: datetime | None = None
     abandoned_at: datetime | None = None
+    # Para que el reintento diferido sepa con qué credencial hablarle al CRM
+    # cuando despierte. Van al final por la regla de los dataclass: un campo
+    # con valor por defecto no puede preceder a uno sin él.
+    organization_id: str = ""
+    organization_slug: str = ""
+    # Y qué despacho estaba contestando: el CRM lo exige al responder por el
+    # cerebro, y cuando el worker despierta el turno ya no existe para dárselo.
+    dispatch_id: str = ""
 
 
 @dataclass
@@ -157,6 +168,9 @@ class InboundMessage:
 class Store(Protocol):
     """Contrato de persistencia del bot (Postgres real o memoria en tests)."""
 
+    async def enqueue_dispatch(self, org: str, payload: dict[str, Any]) -> None: ...
+    def claim_dispatch(self) -> AbstractAsyncContextManager[DispatchJob | None]: ...
+
     # dedup
     async def mark_processed(self, wa_message_id: str) -> bool:
         """True si el mensaje es nuevo (gana el INSERT); False si ya se procesó."""
@@ -172,7 +186,12 @@ class Store(Protocol):
     ) -> None: ...
 
     # conversaciones
-    async def get_or_create_conversation(self, wa_identity: str) -> Conversation: ...
+    async def get_or_create_conversation(
+        self,
+        wa_identity: str,
+        organization_id: str = "",
+        organization_slug: str = "",
+    ) -> Conversation: ...
     async def update_conversation(self, conversation_id: int, **fields: Any) -> None: ...
     async def reset_conversation(self, conversation_id: int) -> None:
         """Borra historial + slots y regresa la conversación a estado inicial
@@ -198,59 +217,15 @@ class Store(Protocol):
     async def get_offered_slots(self, conversation_id: int) -> list[OfferedSlot]: ...
     async def clear_offered_slots(self, conversation_id: int) -> None: ...
 
-    # cita activa en Google Calendar (motor propio, ver app/gcal.py)
-    async def save_calendar_booking(
-        self,
-        conversation_id: int,
-        google_event_id: str,
-        service_key: str,
-        start_utc: datetime,
-        end_utc: datetime,
-    ) -> CalendarBooking: ...
-    async def get_active_calendar_booking(
-        self, conversation_id: int
-    ) -> CalendarBooking | None: ...
-    async def update_calendar_booking_time(
-        self, conversation_id: int, start_utc: datetime, end_utc: datetime
-    ) -> None: ...
-    async def cancel_calendar_booking(self, conversation_id: int) -> None: ...
-
-    # aprobación del dueño antes de reservar (candado de negocio)
-    async def create_pending_booking(
+    # cola de envíos pendientes (respuestas que no pudieron salir en el turno)
+    async def enqueue_pending_send(
         self,
         conversation_id: int,
         crm_conversation_id: str,
-        service_key: str,
-        start_utc: datetime,
-        end_utc: datetime,
-        label: str,
-        direccion: str,
-        dia_confirmado: str,
-        next_reminder_at: datetime,
-        costo_cotizado: float = 0.0,
-        telefono_cliente: str = "",
-        kind: str = "nueva",
-        google_event_id: str | None = None,
-    ) -> PendingBooking: ...
-    async def get_pending_booking(self, pending_id: int) -> PendingBooking | None: ...
-    async def list_pending_bookings_pendientes(self) -> list[PendingBooking]: ...
-    async def list_pending_bookings_for_conversation(
-        self, conversation_id: int
-    ) -> list[PendingBooking]:
-        """Todas (cualquier estado) — para detectar reutilización de la
-        dirección de OTRO domicilio mencionado antes en la misma conversación."""
-        ...
-    async def due_booking_reminders(self, now: datetime) -> list[PendingBooking]: ...
-    async def mark_booking_reminder_sent(
-        self, pending_id: int, next_reminder_at: datetime
-    ) -> None: ...
-    async def resolve_pending_booking(self, pending_id: int, estado: str) -> None:
-        """estado: 'aprobado' o 'rechazado' — marca resolved_at = now()."""
-        ...
-
-    # cola de envíos pendientes (respuestas que no pudieron salir en el turno)
-    async def enqueue_pending_send(
-        self, conversation_id: int, crm_conversation_id: str, content: str
+        content: str,
+        organization_id: str = "",
+        organization_slug: str = "",
+        dispatch_id: str = "",
     ) -> int: ...
     async def due_pending_sends(self, now: datetime) -> list[PendingSend]: ...
     async def mark_pending_send_delivered(self, pending_id: int) -> None: ...
@@ -265,6 +240,14 @@ class Store(Protocol):
         """Marca followup_sent=True atómicamente. True si ESTA llamada lo ganó."""
         ...
 
+    async def relay_stats(self) -> RelayStats: ...
+    # ¿Sigue en la cola, sin entregar, el payload que trae alguno de estos
+    # wamids? Es lo que separa «el CRM no conoce a este lead» de «el CRM
+    # todavía no recibe su mensaje» cuando `/api/bot/context` da 404.
+    async def relay_pendiente_con(self, marcas: list[str]) -> bool: ...
+    # Lo pendiente vuelve a tocar YA (el CRM contestó: ya no hay por qué
+    # esperar el backoff). Devuelve cuántas filas adelantó.
+    async def adelantar_relays(self, now: datetime) -> int: ...
     async def ping(self) -> None: ...
     async def aclose(self) -> None: ...
 
@@ -272,7 +255,7 @@ class Store(Protocol):
 # ------------------------------------------------------- fake en memoria ---
 
 
-class MemoryStore:
+class MemoryStore(MemoryDispatchStore):
     """Implementación en memoria del Store — solo para tests."""
 
     def __init__(self) -> None:
@@ -280,12 +263,10 @@ class MemoryStore:
         self.processed: set[str] = set()
         self.relays: dict[int, RelayItem] = {}
         self.conversations: dict[int, Conversation] = {}
-        self._conv_by_identity: dict[str, int] = {}
+        self._conv_by_identity: dict[tuple[str, str], int] = {}
         self.messages: list[BotMessage] = []
         self.offered: dict[int, list[OfferedSlot]] = {}
         self.pending_sends: dict[int, PendingSend] = {}
-        self.calendar_bookings: dict[int, CalendarBooking] = {}  # por conversation_id, solo la activa
-        self.pending_bookings: dict[int, PendingBooking] = {}
 
     async def mark_processed(self, wa_message_id: str) -> bool:
         if wa_message_id in self.processed:
@@ -321,18 +302,73 @@ class MemoryStore:
         item = self.relays[relay_id]
         item.attempts = attempts
         item.next_retry_at = next_retry_at
+        item.last_error_at = utcnow()
 
-    async def get_or_create_conversation(self, wa_identity: str) -> Conversation:
-        cid = self._conv_by_identity.get(wa_identity)
+    async def relay_pendiente_con(self, marcas: list[str]) -> bool:
+        claves = [m.encode() for m in marcas if m]
+        return any(
+            clave in r.body
+            for r in self.relays.values()
+            if r.delivered_at is None and r.abandoned_at is None
+            for clave in claves
+        )
+
+    async def adelantar_relays(self, now: datetime) -> int:
+        n = 0
+        for r in self.relays.values():
+            if r.delivered_at is None and r.abandoned_at is None and r.next_retry_at > now:
+                r.next_retry_at = now
+                n += 1
+        return n
+
+    async def relay_stats(self) -> RelayStats:
+        pendientes = [
+            r for r in self.relays.values()
+            if r.delivered_at is None and r.abandoned_at is None
+        ]
+        errores = [r.last_error_at for r in self.relays.values() if r.last_error_at]
+        mas_viejo = min((r.created_at for r in pendientes), default=None)
+        return RelayStats(
+            pendientes=len(pendientes),
+            mas_viejo_segundos=(
+                max(0, int((utcnow() - mas_viejo).total_seconds()))
+                if mas_viejo is not None
+                else None
+            ),
+            ultimo_error_en=max(errores, default=None),
+        )
+
+    async def get_or_create_conversation(
+        self,
+        wa_identity: str,
+        organization_id: str = "",
+        organization_slug: str = "",
+    ) -> Conversation:
+        clave = (organization_id, wa_identity)
+        cid = self._conv_by_identity.get(clave)
         if cid is not None:
-            return self.conversations[cid]
+            conv = self.conversations[cid]
+            # Igual que el ON CONFLICT de PgStore: el slug se refresca, porque
+            # un miembro puede renombrar su subdominio y el id no cambia.
+            conv.organization_slug = organization_slug
+            return conv
         cid = next(self._ids)
-        conv = Conversation(id=cid, wa_identity=wa_identity)
+        conv = Conversation(
+            id=cid,
+            wa_identity=wa_identity,
+            organization_id=organization_id,
+            organization_slug=organization_slug,
+        )
         self.conversations[cid] = conv
-        self._conv_by_identity[wa_identity] = cid
+        self._conv_by_identity[clave] = cid
         return conv
 
     async def update_conversation(self, conversation_id: int, **fields: Any) -> None:
+        desconocidas = set(fields) - COLUMNAS_DE_CONVERSACION
+        if desconocidas:
+            raise ValueError(
+                f"columnas desconocidas en update_conversation: {desconocidas}"
+            )
         conv = self.conversations[conversation_id]
         for key, value in fields.items():
             setattr(conv, key, value)
@@ -349,6 +385,7 @@ class MemoryStore:
         conv.followup_due_at = None
         conv.followup_sent = False
         conv.stalled_at = None
+        conv.caso = {}
 
     async def add_message(
         self,
@@ -384,116 +421,14 @@ class MemoryStore:
     async def clear_offered_slots(self, conversation_id: int) -> None:
         self.offered.pop(conversation_id, None)
 
-    async def save_calendar_booking(
-        self,
-        conversation_id: int,
-        google_event_id: str,
-        service_key: str,
-        start_utc: datetime,
-        end_utc: datetime,
-    ) -> CalendarBooking:
-        booking = CalendarBooking(
-            id=next(self._ids),
-            conversation_id=conversation_id,
-            google_event_id=google_event_id,
-            service_key=service_key,
-            start_utc=start_utc,
-            end_utc=end_utc,
-        )
-        self.calendar_bookings[conversation_id] = booking
-        return booking
-
-    async def get_active_calendar_booking(
-        self, conversation_id: int
-    ) -> CalendarBooking | None:
-        return self.calendar_bookings.get(conversation_id)
-
-    async def update_calendar_booking_time(
-        self, conversation_id: int, start_utc: datetime, end_utc: datetime
-    ) -> None:
-        booking = self.calendar_bookings.get(conversation_id)
-        if booking is not None:
-            booking.start_utc = start_utc
-            booking.end_utc = end_utc
-
-    async def cancel_calendar_booking(self, conversation_id: int) -> None:
-        self.calendar_bookings.pop(conversation_id, None)
-
-    async def create_pending_booking(
+    async def enqueue_pending_send(
         self,
         conversation_id: int,
         crm_conversation_id: str,
-        service_key: str,
-        start_utc: datetime,
-        end_utc: datetime,
-        label: str,
-        direccion: str,
-        dia_confirmado: str,
-        next_reminder_at: datetime,
-        costo_cotizado: float = 0.0,
-        telefono_cliente: str = "",
-        kind: str = "nueva",
-        google_event_id: str | None = None,
-    ) -> PendingBooking:
-        pid = next(self._ids)
-        pending = PendingBooking(
-            id=pid,
-            conversation_id=conversation_id,
-            crm_conversation_id=crm_conversation_id,
-            service_key=service_key,
-            start_utc=start_utc,
-            end_utc=end_utc,
-            label=label,
-            direccion=direccion,
-            dia_confirmado=dia_confirmado,
-            next_reminder_at=next_reminder_at,
-            costo_cotizado=costo_cotizado,
-            telefono_cliente=telefono_cliente,
-            kind=kind,
-            google_event_id=google_event_id,
-        )
-        self.pending_bookings[pid] = pending
-        return pending
-
-    async def get_pending_booking(self, pending_id: int) -> PendingBooking | None:
-        return self.pending_bookings.get(pending_id)
-
-    async def list_pending_bookings_pendientes(self) -> list[PendingBooking]:
-        return sorted(
-            (p for p in self.pending_bookings.values() if p.estado == "pendiente"),
-            key=lambda p: p.id,
-        )
-
-    async def list_pending_bookings_for_conversation(
-        self, conversation_id: int
-    ) -> list[PendingBooking]:
-        return sorted(
-            (p for p in self.pending_bookings.values() if p.conversation_id == conversation_id),
-            key=lambda p: p.id,
-        )
-
-    async def due_booking_reminders(self, now: datetime) -> list[PendingBooking]:
-        return [
-            p for p in sorted(self.pending_bookings.values(), key=lambda p: p.id)
-            if p.estado == "pendiente" and p.next_reminder_at <= now
-        ]
-
-    async def mark_booking_reminder_sent(
-        self, pending_id: int, next_reminder_at: datetime
-    ) -> None:
-        pending = self.pending_bookings.get(pending_id)
-        if pending is not None:
-            pending.reminders_sent += 1
-            pending.next_reminder_at = next_reminder_at
-
-    async def resolve_pending_booking(self, pending_id: int, estado: str) -> None:
-        pending = self.pending_bookings.get(pending_id)
-        if pending is not None:
-            pending.estado = estado
-            pending.resolved_at = utcnow()
-
-    async def enqueue_pending_send(
-        self, conversation_id: int, crm_conversation_id: str, content: str
+        content: str,
+        organization_id: str = "",
+        organization_slug: str = "",
+        dispatch_id: str = "",
     ) -> int:
         pid = next(self._ids)
         now = utcnow()
@@ -501,6 +436,9 @@ class MemoryStore:
             id=pid, conversation_id=conversation_id,
             crm_conversation_id=crm_conversation_id, content=content,
             attempts=0, created_at=now, next_retry_at=now,
+            organization_id=organization_id,
+            organization_slug=organization_slug,
+            dispatch_id=dispatch_id,
         )
         return pid
 
@@ -558,10 +496,27 @@ class AppContext:
     store: Store
     crm: Any  # CrmClient
     llm: Any  # OpenAiLlm o fake con .complete()
-    calendar: Any = None  # GoogleCalendarClient / NullCalendarClient (app/gcal.py)
     profile: Any | None = None  # ProfileProvider; None en tests = perfil mínimo
+    # Modo multi-organización: el registro de clientes por organización.
+    # None fuera de ese modo — una Nea de un solo negocio no lo necesita, y
+    # que sea None es lo que hace evidente en qué modo está corriendo.
+    registro: Any | None = None  # RegistroDeOrganizaciones
+    # (organization_id, slug) del turno en curso. La pone el despacho al armar
+    # el contexto del turno; None fuera del modo multi-organización.
+    organizacion: tuple[str, str] | None = None
     coalescer: Any | None = None
     relay_wake: asyncio.Event = field(default_factory=asyncio.Event)
+    dispatch_wake: asyncio.Event = field(default_factory=asyncio.Event)
+    # ¿El CRM de esta instancia tiene motor de agenda? Vocero lo trae detrás de
+    # una bandera de despliegue y viene apagado por defecto. Es lo que vale en
+    # el turno en curso: el turno lo refresca al empezar desde `agenda_sonda`
+    # (y una herramienta lo apaga si choca con el 404 de la bandera), para no
+    # ofrecerle horarios a un lead contra un CRM que no puede agendarlos.
+    agenda_enabled: bool = True
+    # La respuesta del CRM con caducidad (app/agenda.py): encender o apagar
+    # AGENDA allá llega sin reiniciar Nea. None = sin sonda (pruebas que fijan
+    # `agenda_enabled` a mano).
+    agenda_sonda: Any | None = None
     # Un candado por identidad: los turnos de UNA conversación se serializan.
     # Sin esto, una ráfaga que llega mientras el turno anterior sigue en vuelo
     # abre un segundo turno con contexto viejo (se reservó una cita antes de
@@ -569,3 +524,8 @@ class AppContext:
     turn_locks: dict[str, asyncio.Lock] = field(default_factory=dict)
     # Cuántos turnos tienen tomado (o esperan) el candado de esa identidad.
     turn_lock_users: dict[str, int] = field(default_factory=dict)
+    # Ráfagas que no alcanzaron al CRM y esperan su reintento (app/turn.py),
+    # por (organización, identidad): a lo más UNA por conversación, y el
+    # mensaje nuevo que llega mientras tanto se la lleva consigo. Se comparte
+    # con los contextos por organización (`replace` copia la referencia).
+    turnos_pendientes: dict[tuple[str, str], Any] = field(default_factory=dict)
