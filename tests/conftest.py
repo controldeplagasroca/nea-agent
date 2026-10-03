@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import json
+import hashlib
+import hmac
 from typing import Any
 
 import httpx
@@ -20,6 +22,26 @@ IDENTITY = "525550001111"
 CRM_CONV_ID = "cv_test1"
 
 
+@pytest.fixture(autouse=True)
+def signed_meta_fixture(monkeypatch):
+    """The simulated Meta sender signs default-fixture events, as Meta does.
+    Security tests use a different or empty secret and remain fully explicit.
+    """
+    original = httpx.ASGITransport.handle_async_request
+
+    async def send(transport, request):
+        ctx = getattr(transport.app.state, "ctx", None)
+        if (ctx is not None and ctx.settings.meta_app_secret == "test-meta-event-signing"
+                and request.url.path == "/webhook" and request.method == "POST"
+                and "x-hub-signature-256" not in request.headers):
+            body = await request.aread()
+            request.headers["x-hub-signature-256"] = "sha256=" + hmac.new(
+                b"test-meta-event-signing", body, hashlib.sha256).hexdigest()
+        return await original(transport, request)
+
+    monkeypatch.setattr(httpx.ASGITransport, "handle_async_request", send)
+
+
 class FakeLLM:
     """LLM determinista: entrega respuestas en cola y registra las llamadas."""
 
@@ -34,7 +56,7 @@ class FakeLLM:
         self,
         messages: list[dict[str, Any]],
         tools: list[dict[str, Any]] | None = None,
-        tool_choice: dict[str, Any] | str | None = None,
+        tool_choice: str | None = None,
     ) -> LlmReply:
         self.calls.append({"messages": messages, "tools": tools, "tool_choice": tool_choice})
         if self.raise_exc is not None:
@@ -52,91 +74,15 @@ class FakeLLM:
         return self.transcript_text
 
 
-class FakeCalendar:
-    """Calendario fake: registra llamadas y entrega resultados en cola, sin
-    pegarle a Google. La lógica real de disponibilidad vive en app/gcal.py y
-    se prueba aparte en tests/test_gcal.py; aquí solo importa que tools.py
-    orqueste bien lo que el calendario le devuelva."""
-
-    def __init__(self) -> None:
-        self.availability_calls: list[dict[str, Any]] = []
-        self.booking_calls: list[dict[str, Any]] = []
-        self.reschedule_calls: list[dict[str, Any]] = []
-        self.cancel_calls: list[str] = []
-        self.availability_queue: list[list[dict[str, Any]]] = []
-        self.create_result: dict[str, Any] | Exception = {"event_id": "evt_1"}
-        self.reschedule_result: dict[str, Any] | Exception = {}
-        self.cancel_exc: Exception | None = None
-
-    async def get_availability(
-        self, service_key: str, limit: int = 12, per_day: int = 3, days: int = 5,
-    ) -> list[dict[str, Any]]:
-        self.availability_calls.append(
-            {"service_key": service_key, "limit": limit, "per_day": per_day, "days": days}
-        )
-        if self.availability_queue:
-            return self.availability_queue.pop(0)
-        return []
-
-    async def create_booking(
-        self, start_utc: Any, end_utc: Any, summary: str, description: str, service_key: str,
-    ) -> dict[str, Any]:
-        self.booking_calls.append(
-            {
-                "start_utc": start_utc,
-                "end_utc": end_utc,
-                "summary": summary,
-                "description": description,
-                "service_key": service_key,
-            }
-        )
-        if isinstance(self.create_result, Exception):
-            raise self.create_result
-        return self.create_result
-
-    async def reschedule_booking(
-        self,
-        event_id: str,
-        old_start: Any,
-        old_end: Any,
-        new_start: Any,
-        new_end: Any,
-        summary: str,
-        description: str,
-        service_key: str,
-    ) -> dict[str, Any]:
-        self.reschedule_calls.append(
-            {
-                "event_id": event_id,
-                "old_start": old_start,
-                "old_end": old_end,
-                "new_start": new_start,
-                "new_end": new_end,
-                "service_key": service_key,
-            }
-        )
-        if isinstance(self.reschedule_result, Exception):
-            raise self.reschedule_result
-        return self.reschedule_result
-
-    async def cancel_booking(self, event_id: str) -> None:
-        self.cancel_calls.append(event_id)
-        if self.cancel_exc is not None:
-            raise self.cancel_exc
-
-    async def aclose(self) -> None:
-        return None
-
-
 def make_settings(**overrides: Any) -> Settings:
     values: dict[str, Any] = dict(
         verify_token="vtoken",
-        meta_app_secret="",
+        meta_app_secret="test-meta-event-signing",
         crm_base_url=CRM_URL,
         crm_webhook_url=CRM_WEBHOOK_URL,
         crm_bot_api_key="test-key",
-        openai_api_key="sk-test",
-        openai_model="gpt-test",
+        llm_api_key="sk-test",
+        llm_model="gpt-test",
         history_window=10,
         allowed_wa_ids="",
         coalesce_seconds=0.05,
@@ -149,18 +95,13 @@ def make_settings(**overrides: Any) -> Settings:
     return Settings(_env_file=None, **values)
 
 
-def make_ctx(
-    settings: Settings | None = None,
-    llm: FakeLLM | None = None,
-    calendar: Any | None = None,
-) -> AppContext:
+def make_ctx(settings: Settings | None = None, llm: FakeLLM | None = None) -> AppContext:
     settings = settings or make_settings()
     return AppContext(
         settings=settings,
         store=MemoryStore(),
         crm=CrmClient(settings.crm_base_url, settings.crm_bot_api_key),
         llm=llm or FakeLLM(),
-        calendar=calendar if calendar is not None else FakeCalendar(),
     )
 
 
@@ -176,7 +117,6 @@ async def client(ctx: AppContext):
     async with httpx.AsyncClient(transport=transport, base_url="http://bot.test") as c:
         yield c
     await ctx.crm.aclose()
-    await ctx.calendar.aclose()
 
 
 def wa_payload(

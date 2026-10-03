@@ -1,0 +1,1183 @@
+"""Las herramientas que ve el modelo en el vertical de plagas, con sus compuertas.
+
+El modelo decide CUÁNDO llamar; aquí se decide si PROCEDE y qué es verdad:
+
+- `verificar_cobertura` → app/plagas/cobertura.py
+- `identificar_plaga`   → app/plagas/diagnostico.py (mínimo 2 señales con cita)
+- `cotizar`             → app/plagas/precios.py (la única fuente de una cifra)
+- `propose_slots`       → la agenda real del CRM (solo tras aceptar el precio)
+- `book_session`        → SOLICITUD de visita, con dirección completa; queda
+                          pendiente de que el dueño la confirme
+- `handoff`             → pasa la conversación al dueño
+
+Una llamada fuera de orden no se ignora ni revienta: regresa un error que dice
+qué toca hacer primero. Y cuando el resultado es un texto que NO puede variar
+(el resumen de la cotización, la tarjeta comparativa, la solicitud de visita),
+el servidor lo deja en `texto_garantizado` y ese es el que sale, escriba lo que
+escriba el modelo.
+
+La ficha del CRM la escribe el servidor desde aquí: cuando dependía de que el
+modelo llamara `update_ficha`, 166 de 167 contactos quedaron con la ficha vacía.
+"""
+from __future__ import annotations
+
+import logging
+import re
+from datetime import date, datetime, timedelta
+from typing import Any
+
+from app import hostility
+from app.crm import CrmError
+from app.plagas import candados, catalogo, cobertura, diagnostico, precios
+from app.plagas.caso import DIRECCION_CAMPOS, DIRECCION_NOMBRES, Caso
+from app.plagas.texto import normalizar
+from app.state import OfferedSlot
+from app.tools import TOOL_SCHEMAS, ToolRuntime, _zona_del_negocio
+
+logger = logging.getLogger("nea.plagas")
+
+# Lo que puede escribir el modelo al confirmar la plaga (saludo, qué plaga es,
+# empatía). El tratamiento y la pregunta van debajo, del servidor.
+MAX_FRASE_DE_CONFIRMACION = 190
+# El mensaje que confirma la plaga es el único del modelo que puede pasar del
+# tope normal: lleva debajo la tranquilidad, el tratamiento y las visitas, y el
+# dueño pidió que ese momento se explique completo («yo sí lo doy a detalle»).
+TOPE_DE_CONFIRMACION = 640
+
+# Primer atasco: tarjeta comparativa. Segundo: se pide una foto (repetir la
+# tarjeta era un bucle — sección 15 de la especificación). Tercero: lo ve una
+# persona.
+ATASCOS_PARA_FOTO = 2
+ATASCOS_PARA_DUENO = 3
+
+_SENALES_GUIA = "id de la señal, tal cual aparece en la GUÍA DE IDENTIFICACIÓN"
+
+ESQUEMAS_PROPIOS: list[dict[str, Any]] = [
+    {
+        "type": "function",
+        "function": {
+            "name": "verificar_cobertura",
+            "description": (
+                "Dice si el negocio da servicio en la zona del lead. Llámala EN EL "
+                "MISMO TURNO en que el lead mencione su colonia, alcaldía, "
+                "municipio o código postal — antes de decirle nada sobre "
+                "cobertura. Nunca respondas de memoria: hay colonias con el mismo "
+                "nombre en zonas distintas."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "zona": {
+                        "type": "string",
+                        "description": "Colonia, alcaldía o municipio, como lo escribió el lead",
+                    },
+                    "codigo_postal": {
+                        "type": "string",
+                        "description": "Código postal de 5 dígitos, si el lead lo dio",
+                    },
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "identificar_plaga",
+            "description": (
+                "Registra lo que el lead ha dicho de su plaga y dice si YA alcanza "
+                "para confirmarla (mínimo dos señales) o cuál es la siguiente "
+                "pregunta. Llámala cada vez que el lead describa su plaga o "
+                "conteste una pregunta de identificación. Manda SOLO señales que "
+                "el lead escribió, cada una con su cita textual: una señal sin "
+                "cita real se rechaza."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "plaga": {"type": "string", "enum": catalogo.PLAGAS_PARA_MODELO},
+                    "senales": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "senal": {"type": "string", "description": _SENALES_GUIA},
+                                "cita": {
+                                    "type": "string",
+                                    "description": (
+                                        "Las palabras exactas del lead que lo dicen "
+                                        "(o \"foto\" si se ve en la imagen que mandó)"
+                                    ),
+                                },
+                            },
+                            "required": ["senal", "cita"],
+                        },
+                    },
+                    "descripcion": {
+                        "type": "string",
+                        "description": "Solo si plaga=otra: cómo la llamó el lead",
+                    },
+                },
+                "required": ["plaga"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "cotizar",
+            "description": (
+                "Calcula el precio REAL de la plaga ya confirmada, con el catálogo "
+                "del negocio. Es la ÚNICA fuente de una cifra. Llámala cuando el "
+                "lead pida precio o muestre interés, con los datos que ya dio; si "
+                "falta alguno, te dice cuál preguntar. Manda solo lo que el lead "
+                "haya dicho: no supongas ni rellenes datos."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "tipo_inmueble": {
+                        "type": "string",
+                        "description": "casa | departamento | local_comercial | edificio",
+                    },
+                    "m2": {"type": "number", "description": "Metros cuadrados a tratar"},
+                    "largo": {"type": "number", "description": "Largo del área en metros"},
+                    "ancho": {"type": "number", "description": "Ancho del área en metros"},
+                    "refrigeradores": {
+                        "type": "integer",
+                        "description": "Refrigeradores o congeladores (local comercial)",
+                    },
+                    "registros": {"type": "integer", "description": "Registros o coladeras a tratar"},
+                    "sanitarios": {"type": "integer", "description": "Baños totales del inmueble"},
+                    "colchones": {"type": "integer", "description": "Colchones TOTALES de la casa"},
+                    "sillones": {"type": "integer", "description": "Sillones totales"},
+                    "sillas_comedor": {"type": "integer", "description": "Sillas de comedor totales"},
+                },
+            },
+        },
+    },
+]
+
+_DIRECCION_PROPS = {
+    "calle": {"type": "string"},
+    "numero_exterior": {"type": "string"},
+    "numero_interior": {"type": "string", "description": "Interior o departamento, si aplica"},
+    "colonia": {"type": "string"},
+    "alcaldia_municipio": {"type": "string"},
+    "referencia": {"type": "string", "description": "Referencia para llegar"},
+}
+
+
+def _esquema(nombre: str) -> dict[str, Any]:
+    import copy
+
+    return copy.deepcopy(
+        next(t for t in TOOL_SCHEMAS if t["function"]["name"] == nombre)
+    )
+
+
+def esquemas(agenda: bool, aprobacion: bool) -> list[dict[str, Any]]:
+    """El catálogo de herramientas de ESTE turno (sin agenda, sin las de agendar)."""
+    out = list(ESQUEMAS_PROPIOS)
+    if agenda:
+        propose = _esquema("propose_slots")
+        propose["function"]["description"] = (
+            "Consulta los horarios REALES para la visita. Llámala SOLO cuando el "
+            "lead ya recibió su cotización y dijo que sí quiere agendar. "
+            + propose["function"]["description"]
+        )
+        book = _esquema("book_session")
+        book["function"]["description"] = (
+            (
+                "Registra la SOLICITUD de visita en uno de los horarios ofrecidos; "
+                "queda pendiente de que el dueño la confirme. "
+                if aprobacion
+                else "Reserva la visita en uno de los horarios ofrecidos. "
+            )
+            + "Necesita el start_utc EXACTO de un horario ofrecido, lo que el lead "
+            "escribió para aceptar ese día, y la dirección COMPLETA por escrito "
+            "(un pin de ubicación no basta). Manda los campos de dirección que el "
+            "lead ya haya dado: si falta alguno, te dice cuál pedir."
+        )
+        book["function"]["parameters"]["properties"].update(_DIRECCION_PROPS)
+        out += [propose, book]
+    handoff = _esquema("handoff")
+    handoff["function"]["parameters"]["properties"] = {
+        "reason": {
+            "type": "string",
+            "enum": ["cliente", "modelo", "hostilidad"],
+            "description": (
+                "cliente = pidió hablar con una persona, o ya es cliente y necesita "
+                "al dueño · modelo = duda fuera de lo que sabes, o insiste en saber "
+                "qué IA eres · hostilidad = tercer mensaje hostil seguido"
+            ),
+        },
+        "nota": {
+            "type": "string",
+            "description": "Una línea para el dueño: qué necesita esta persona",
+        },
+    }
+    handoff["function"]["parameters"]["required"] = ["reason"]
+    out.append(handoff)
+    return out
+
+
+class RuntimeDePlagas(ToolRuntime):
+    """`ToolRuntime` con el expediente y las compuertas del negocio."""
+
+    def __init__(
+        self,
+        *args: Any,
+        caso: Caso,
+        mensajes_lead: list[str],
+        ultimo_bot: str = "",
+        hay_imagen: bool = False,
+        nombre_lead: str = "",
+        racha_hostil: int = 0,
+        **kwargs: Any,
+    ) -> None:
+        super().__init__(*args, **kwargs)
+        self.caso = caso
+        self._mensajes_lead = mensajes_lead
+        self._ultimo_bot = ultimo_bot
+        self._hay_imagen = hay_imagen
+        self._nombre_lead = nombre_lead.strip()
+        self._racha_hostil = racha_hostil
+        # El texto que SALE, escriba lo que escriba el modelo.
+        self.texto_garantizado: str | None = None
+        # Al confirmar la plaga: el tratamiento lo escribe el servidor y el
+        # modelo solo pone la frase de confirmación y la empatía.
+        self.confirmacion: str | None = None
+        self.cotizado = False
+        # En este turno identificar_plaga dejó una pregunta pendiente (aunque
+        # ya hubiera una plaga confirmada: el lead describe otra).
+        self.identificacion_abierta = False
+        self._cotizaciones = 0  # llamadas a cotizar en ESTE turno
+        self.llamadas: list[str] = []
+
+    @property
+    def _texto_lead(self) -> str:
+        return self._mensajes_lead[-1] if self._mensajes_lead else ""
+
+    @property
+    def _aprobacion(self) -> bool:
+        return getattr(self._ctx.settings, "agenda_modo", "aprobacion") != "directa"
+
+    # ------------------------------------------------------------ entrada ---
+
+    async def execute(self, name: str, args: dict[str, Any]) -> dict[str, Any]:
+        self.llamadas.append(name)
+        try:
+            if name == "verificar_cobertura":
+                return await self._verificar_cobertura(args)
+            if name == "identificar_plaga":
+                return await self._identificar_plaga(args)
+            if name == "cotizar":
+                return await self._cotizar(args)
+            if name == "handoff":
+                return await self._handoff_del_modelo(args)
+            if name in ("update_ficha", "route_out"):
+                # No se le enseñan al modelo en este vertical; si las inventa,
+                # se le dice qué sí existe en vez de fingir que funcionaron.
+                return {"ok": False, "error": "herramienta_no_disponible"}
+        except CrmError as exc:
+            logger.warning("plagas: %s falló contra el CRM: %s", name, exc)
+            return {"ok": False, "error": "crm_error"}
+        return await super().execute(name, args)
+
+    def finalize_reply(self, text: str) -> str:
+        if self.texto_garantizado:
+            return self.texto_garantizado
+        if self.confirmacion:
+            return f"{self._frase_de_confirmacion(text)}\n\n{self.confirmacion}"
+        return super().finalize_reply(text)
+
+    def _frase_de_confirmacion(self, text: str) -> str:
+        """Lo que el modelo escribió al confirmar, si respeta su parte.
+
+        Su parte es corta: decir qué plaga es con lo que le contó el lead y una
+        frase de empatía. Si se puso a explicar el tratamiento, a cotizar o a
+        preguntar, se usa una frase neutra: el tratamiento y la pregunta ya
+        los pone el servidor, sin errores.
+        """
+        caso = self.caso
+        info = catalogo.PLAGAS.get(caso.plaga or "") or {}
+        texto = candados.sin_caracteres_raros((text or "").strip())
+
+        # Si el servidor ya pone la tranquilidad («no te preocupes: no es por
+        # falta de higiene…»), la del modelo sobra y la repetiría.
+        repite = r"\bno te preocupes\b|\btranquil" if info.get("tranquilidad") else r"(?!)"
+
+        def cumple(frase: str) -> bool:
+            return (
+                "?" not in frase
+                # Adornos de su cosecha: «es de las más comunes», «muy común».
+                and not re.search(r"\bm[aá]s com[uú]n|\bmuy com[uú]n|\bcomun[ií]sim", frase, re.I)
+                and not re.search(repite, normalizar(frase))
+                and not candados.montos(frase)
+                and not candados.tratamiento_ajeno(frase, caso.plaga)
+                and not candados._PROVEEDOR.search(frase)
+                and not re.search(
+                    r"\bvisitas?\b|\btratamiento\b|\bse aplica|\bprocedimiento|\bprecio|\bcosto",
+                    frase, re.I,
+                )
+            )
+
+        # Frase por frase: lo que cumple su parte se queda (saludo, qué plaga
+        # es, empatía); lo que se adelanta al tratamiento o al precio se va.
+        conservadas: list[str] = []
+        largo = 0
+        # Lo que cabe depende de lo que ya ocupa el bloque del servidor (con
+        # la precaución de la araña es más largo): el total no pasa del tope.
+        cabe = min(
+            MAX_FRASE_DE_CONFIRMACION,
+            TOPE_DE_CONFIRMACION - 10 - len(self.confirmacion or ""),
+        )
+        # Un emoji seguido de mayúscula también cierra frase («…alemana 🪳 No te
+        # preocupes…»): si no, una frase que sobra tiraba también la buena.
+        # «el Ing. Leopoldo» no cierra frase: se protege el punto de la abreviatura
+        # (en la autoprueba salió «ese punto lo define directamente el Ing.»).
+        protegido = candados._ABREVIATURA.sub("\\1\u2024", texto)
+        for frase in re.split(
+            r"(?<=[.!…])\s+|\n+|(?<=[\U0001F300-\U0001FAFF☀-➿])\s+(?=[A-ZÁÉÍÓÚÑ¡¿])", protegido
+        ):
+            frase = frase.replace("\u2024", ".").strip()
+            if not frase or not cumple(frase):
+                continue
+            if largo + len(frase) > cabe:
+                break
+            conservadas.append(frase)
+            largo += len(frase) + 1
+        nombre = normalizar(info.get("nombre", "")).split()
+        if conservadas and nombre and nombre[0] in normalizar(" ".join(conservadas)):
+            return " ".join(conservadas)
+        logger.info("plagas: la frase de confirmación no nombra la plaga — agrego la neutra")
+        neutra = f"Por lo que me cuentas, es {info.get('nombre', 'esa plaga').lower()} {info.get('emoji', '')}".rstrip() + "."
+        # Lo que sí cumplía (el saludo, la zona confirmada) se conserva.
+        if conservadas and largo + len(neutra) <= cabe:
+            return " ".join(conservadas) + " " + neutra
+        if not getattr(self._conv, "greeted", True):
+            return f"¡Hola! Soy {self._profile.agent_name}, el agente de IA de {catalogo.NEGOCIO['nombre']} 👋 {neutra}"
+        return neutra
+
+    async def _handoff_del_modelo(self, args: dict[str, Any]) -> dict[str, Any]:
+        """El modelo quiere pasar la conversación al dueño. ¿Procede?"""
+        if self.handoff_reason is not None:
+            # El servidor ya la pasó (con su motivo y su mensaje): no se pisa.
+            return {"ok": True, "nota": "La conversación ya se le pasó al dueño."}
+        razon = str(args.get("reason") or "").strip().lower()
+        texto = self._texto_lead
+        if (
+            razon != "hostilidad"
+            and hostility.is_hostile(texto)
+            and self._racha_hostil < 3
+            and not candados.pide_persona(texto)
+        ):
+            # Sección 13.1: una grosería suelta no inmuta; el pase al dueño es
+            # al TERCER mensaje hostil seguido, y ese lo garantiza el turno.
+            return {
+                "ok": False,
+                "error": "no_es_motivo_de_handoff",
+                "instrucciones": (
+                    "Un mensaje grosero suelto no se le pasa al dueño. Contesta con "
+                    "dignidad en UNA línea, sin engancharte ni sermonear, y ofrece "
+                    "ayuda con su plaga. Si reclama un servicio que ya le hicieron, "
+                    "pregúntale qué pasó."
+                ),
+            }
+        nota = str(args.get("nota") or "").strip()
+        self.caso.escalado = nota or razon or "handoff"
+        await self._ficha({"resultado": "handoff", "notas": nota[:480]})
+        return self._handoff(args)
+
+    # ----------------------------------------------------------- utilería ---
+
+    async def _ficha(self, datos: dict[str, Any]) -> None:
+        """Escribe en la ficha del CRM. Best-effort: nunca tumba la herramienta."""
+        limpios = {k: v for k, v in datos.items() if v not in (None, "", [])}
+        if not limpios:
+            return
+        try:
+            await self._ctx.crm.put_ficha(self._crm_conv_id, limpios)
+        except Exception as exc:  # la conversación no se cae por la ficha
+            logger.warning("plagas: no pude escribir la ficha (%s)", exc)
+
+    async def _escalar(self, razon: str, nota: str, texto: str) -> None:
+        """Le pasa la conversación al dueño, con el mensaje que ve el lead."""
+        self.handoff_reason = razon
+        self.caso.escalado = nota
+        self.texto_garantizado = texto
+        await self._ficha({"resultado": "handoff", "notas": nota[:480]})
+
+    def _puente(self) -> str:
+        return (
+            f"Permíteme un momento mientras te comunico con {catalogo.NEGOCIO['dueno']} 🙌"
+        )
+
+    @staticmethod
+    def _al_dueno() -> str:
+        dueno = catalogo.NEGOCIO["dueno"]
+        return "al " + dueno[3:] if dueno.startswith("el ") else "a " + dueno
+
+    # ---------------------------------------------------------- cobertura ---
+
+    async def _verificar_cobertura(self, args: dict[str, Any]) -> dict[str, Any]:
+        zona = str(args.get("zona") or "").strip()
+        cp = str(args.get("codigo_postal") or "").strip()
+        # Si antes solo dio la colonia y ahora solo el CP, se juntan.
+        previa = self.caso.cobertura
+        if not zona and previa.get("estado") == "requiere_mas_datos":
+            zona = str(previa.get("zona") or "")
+        if not zona and not cp:
+            return {
+                "ok": False,
+                "error": "falta_zona",
+                "instrucciones": "Pregúntale en qué colonia o zona está (o su código postal).",
+            }
+        if (
+            previa.get("estado") == "dentro_de_zona"
+            and 0 < self.caso.turno_cobertura < self.caso.turno  # se verificó en un turno ANTERIOR
+            and self._misma_zona(zona, cp, previa)
+        ):
+            # En la autoprueba el modelo volvió a verificar la misma zona a
+            # media conversación y, con el «confírmaselo», se presentó de nuevo
+            # y regresó a preguntas que el lead ya había contestado.
+            return {
+                "ok": True,
+                "estado": "ya_verificada",
+                "instrucciones": (
+                    "Su zona ya estaba verificada y él ya lo sabe: NO se lo repitas "
+                    "ni te vuelvas a presentar. Contesta lo que acaba de decir y "
+                    "sigue el PASO ACTUAL."
+                ),
+            }
+        res = cobertura.verificar(zona, cp)
+        self.caso.cobertura = res.como_dict()
+        self.caso.turno_cobertura = self.caso.turno
+        geo = " ".join(p for p in (res.zona, f"CP {res.cp}" if res.cp else "") if p)
+
+        if res.estado == "requiere_mas_datos":
+            await self._ficha({"geo": geo})
+            return {
+                "ok": True,
+                "estado": res.estado,
+                "instrucciones": (
+                    "Todavía NO se sabe si hay servicio. Pídele su código postal "
+                    "(solo eso, una pregunta) y espera su respuesta. No digas que "
+                    "sí ni que no hay cobertura."
+                ),
+            }
+        if res.estado == "fuera_de_zona":
+            self.routed_out = True
+            await self._ficha({
+                "geo": geo, "calificado": False, "resultado": "dio_diy",
+                "notas": f"Fuera de zona: {res.motivo}",
+            })
+            return {
+                "ok": True,
+                "estado": res.estado,
+                "instrucciones": (
+                    "Por ahora NO se da servicio en esa zona. Avísale con "
+                    "amabilidad y despídete con la puerta abierta. No ofrezcas "
+                    "alternativas que no existen ni sigas con preguntas."
+                ),
+            }
+        await self._ficha({"geo": geo})
+        out: dict[str, Any] = {
+            "ok": True,
+            "estado": res.estado,
+            "instrucciones": (
+                "SÍ se da servicio en su zona. Confírmaselo en pocas palabras y "
+                "sigue con el paso que toca (identificar la plaga, si falta)."
+            ),
+        }
+        if res.dia_nombre:
+            out["restriccion"] = (
+                f"En esa zona solo se da servicio los {res.dia_nombre}: díselo "
+                "cuando hablen de fechas."
+            )
+        return out
+
+    @staticmethod
+    def _misma_zona(zona: str, cp: str, previa: dict[str, Any]) -> bool:
+        """¿Es la zona que ya se verificó? (otro domicilio sí se verifica de nuevo)."""
+        cp_nuevo = cobertura.extraer_cp(cp) or cobertura.extraer_cp(zona)
+        if cp_nuevo and previa.get("cp") and str(cp_nuevo) != str(previa["cp"]):
+            return False
+        a, b = normalizar(zona), normalizar(str(previa.get("zona") or ""))
+        a = re.sub(r"\b\d{5}\b", "", a).strip(" ,")
+        return not a or not b or a in b or b in a
+
+    # ------------------------------------------------------ identificación ---
+
+    async def _identificar_plaga(self, args: dict[str, Any]) -> dict[str, Any]:
+        caso = self.caso
+        if caso.recurrente:
+            return {
+                "ok": False,
+                "error": "cliente_recurrente",
+                "instrucciones": "Ya es cliente: no lo diagnostiques de nuevo. Averigua qué necesita o pásalo con el dueño.",
+            }
+        plaga = str(args.get("plaga") or "").strip()
+        descripcion = str(args.get("descripcion") or "").strip()
+        senales = args.get("senales") if isinstance(args.get("senales"), list) else []
+
+        # El lead nombra una plaga que NO es del catálogo y ninguna que sí:
+        # se le dice con honestidad y pasa al dueño, la haya etiquetado el
+        # modelo como la haya etiquetado («garrapatas en el perro» no es pulga).
+        if (
+            caso.plaga is None
+            and re.search(catalogo.FUERA_DE_CATALOGO, normalizar(self._texto_lead))
+            and not _alias(self._texto_lead)
+        ):
+            return await self._fuera_de_catalogo(descripcion or self._texto_lead)
+
+        # «otra» o «no sé» solo valen si de verdad no es del catálogo: una
+        # araña con mancha roja es araña, aunque el modelo la sienta «otra».
+        if plaga in ("otra", "no_se_sabe", ""):
+            alias = _alias(descripcion) or _alias(self._texto_lead)
+            if alias:
+                plaga = alias
+            elif plaga == "otra" and (
+                re.search(catalogo.FUERA_DE_CATALOGO, normalizar(descripcion + " " + self._texto_lead))
+                or caso.otras >= 1
+            ):
+                return await self._fuera_de_catalogo(descripcion)
+            elif caso.candidata and caso.candidata not in ("otra", "no_se_sabe"):
+                plaga = caso.candidata  # sigue con la que se estaba identificando
+            else:
+                if plaga == "otra":
+                    caso.otras += 1
+                self.identificacion_abierta = True
+                return {
+                    "ok": True,
+                    "estado": "sin_plaga",
+                    "pregunta_siguiente": catalogo.PREGUNTA_QUE_PLAGA,
+                    "instrucciones": (
+                        "Todavía no se sabe qué plaga es. Hazle la "
+                        "`pregunta_siguiente` (una sola), con tus palabras."
+                    ),
+                }
+
+        # La elección en la tarjeta comparativa solo cuenta si la tarjeta ya la
+        # VIO (se mandó en un turno anterior) y la elige en ESTE mensaje: en la
+        # autoprueba el modelo citaba un mensaje viejo como «eligió la alemana»
+        # en el mismo turno en que salía la tarjeta.
+        tarjeta_vista = caso.tarjetas > 0 and caso.turno_tarjeta < caso.turno
+        senales = [
+            s for s in senales
+            if not str((s or {}).get("senal", "")).startswith("eligio_")
+            or (tarjeta_vista and diagnostico.cita_respaldada(
+                str(s.get("cita") or ""), [self._texto_lead], self._hay_imagen
+            ))
+        ]
+        d = diagnostico.evaluar(
+            plaga,
+            senales,
+            previas=caso.senales if _misma_familia(caso.candidata, plaga) else {},
+            preguntadas=caso.preguntadas if _misma_familia(caso.candidata, plaga) else [],
+            mensajes_lead=self._mensajes_lead,
+            ultimo_bot=self._ultimo_bot,
+            hay_imagen=self._hay_imagen,
+            tarjeta_enviada=tarjeta_vista,
+        )
+        for aviso in d.avisos:
+            logger.info("plagas: señal dudosa — %s", aviso)
+
+        if d.estado == "fuera_de_catalogo":
+            return await self._fuera_de_catalogo(descripcion or plaga)
+
+        if d.estado == "siempre_dueno":
+            info = catalogo.PLAGAS[d.plaga or ""]
+            await self._ficha({"plaga": info["nombre"]})
+            await self._escalar(
+                "modelo",
+                f"{info['nombre']}: requiere atención del dueño",
+                f"{info['nombre']}: {info['siempre_dueno']} " + self._puente(),
+            )
+            return {"ok": True, "estado": d.estado, "instrucciones": "Ya se le avisó al lead y se le pasó al dueño."}
+
+        if not _misma_familia(caso.candidata, plaga):
+            caso.preguntadas = []
+            caso.atascos = 0
+        caso.candidata = plaga
+        caso.senales = d.senales
+        if d.senal_preguntada and d.senal_preguntada not in caso.preguntadas:
+            caso.preguntadas.append(d.senal_preguntada)
+
+        if d.estado == "confirmada" and caso.plaga == d.plaga:
+            # Ya estaba confirmada: nada cambia y no se vuelve a explicar.
+            return {
+                "ok": True,
+                "estado": "ya_estaba_confirmada",
+                "instrucciones": (
+                    "Esta plaga ya estaba confirmada y el tratamiento ya se "
+                    "explicó: NO lo repitas ni vuelvas a anunciarla. Responde a lo "
+                    "que el lead acaba de decir y sigue el PASO ACTUAL."
+                ),
+            }
+        if d.estado == "confirmada" and self.texto_garantizado:
+            # En este turno ya sale la tarjeta (o la foto): se confirma cuando
+            # conteste, para que el tratamiento llegue después y no se pierda.
+            return {
+                "ok": True,
+                "estado": "sin_confirmar",
+                "instrucciones": "Ya se le mandó la comparación; espera su respuesta.",
+            }
+        if d.estado == "confirmada":
+            assert d.plaga is not None
+            if caso.plaga != d.plaga:
+                # Otra plaga = otra cotización. Lo del inmueble se conserva.
+                caso.cotizacion, caso.aceptada = None, False
+            caso.plaga, caso.turno_plaga, caso.atascos = d.plaga, caso.turno, 0
+            await self._ficha({"plaga": catalogo.PLAGAS[d.plaga]["nombre"]})
+            # El tratamiento lo escribe el servidor: en la autoprueba el modelo
+            # parafraseaba «polvo focalizado» como «gel y cebo» (el de la
+            # hormiga) y le añadía causas de su cosecha.
+            self.confirmacion = bloque_de_tratamiento(d.plaga, " ".join(self._mensajes_lead))
+            return {
+                "ok": True,
+                "estado": "confirmada",
+                "plaga": catalogo.PLAGAS[d.plaga]["nombre"],
+                "lo_que_dijo_el_lead": list(d.senales.values()),
+                "instrucciones": (
+                    "Plaga CONFIRMADA. Tu mensaje es SOLO una o dos frases: dile "
+                    "qué plaga es mencionando lo que él te contó («por lo que me "
+                    "cuentas —chiquitas y en la cocina— es…») y una frase de "
+                    "empatía (sin «no te preocupes» ni «es muy común»: la "
+                    "tranquilidad aprobada ya la pone el sistema). Si te preguntó "
+                    "algo más en su mensaje, contéstalo "
+                    "en corto. NO expliques el tratamiento, NO des precio y NO "
+                    "hagas preguntas: el sistema agrega debajo el tratamiento "
+                    "aprobado y la pregunta. Describe solo rasgos de ESTA plaga."
+                ),
+            }
+
+        base: dict[str, Any] = {
+            "ok": True,
+            "estado": "sin_confirmar",
+            "senales_que_ya_cuentan": list(d.senales),
+            "senales_rechazadas": d.rechazadas,
+        }
+        self.identificacion_abierta = True
+        if d.estado == "sin_preguntas" or (plaga.startswith("cucaracha") and d.atasco):
+            return await self._atasco(d, base)
+        await self._ficha({"plaga": f"{plaga} (sin confirmar)"})
+        base["pregunta_siguiente"] = d.pregunta
+        base["instrucciones"] = (
+            "Todavía NO está confirmada: no la nombres como un hecho. Hazle al "
+            "lead la `pregunta_siguiente` (adáptala a tu tono; UNA sola pregunta). "
+            "No preguntes datos de precio."
+        )
+        return base
+
+    async def resolver_sin_modelo(self) -> bool:
+        """¿Este turno lo resuelve el servidor solo? (True = ya hay texto garantizado).
+
+        Hoy un solo caso: el lead nombra una plaga que NO es del catálogo y
+        ninguna que sí, sin haber confirmado otra antes. La especificación es
+        clara (sección 4.3): honestidad y pase al dueño. No hay nada que el
+        modelo deba decidir, y dejándoselo prometía atenderla.
+        """
+        caso = self.caso
+        if caso.plaga is not None or caso.recurrente or caso.escalado:
+            return False
+        texto = self._texto_lead
+        if not re.search(catalogo.FUERA_DE_CATALOGO, normalizar(texto)) or _alias(texto):
+            return False
+        await self._fuera_de_catalogo(texto)
+        if not getattr(self._conv, "greeted", True) and self.texto_garantizado:
+            self.texto_garantizado = (
+                f"¡Hola! Soy {self._profile.agent_name}, el agente de IA de "
+                f"{catalogo.NEGOCIO['nombre']} 👋 " + self.texto_garantizado
+            )
+        return True
+
+    async def _fuera_de_catalogo(self, descripcion: str) -> dict[str, Any]:
+        # El nombre de la plaga si se reconoce («garrapatas»); si no, las
+        # primeras palabras de cómo la describió.
+        plano = normalizar(descripcion or self._texto_lead)
+        m = re.search(r"\b(" + catalogo.FUERA_DE_CATALOGO + r")\w*", plano)
+        nombre = m.group(0) if m else (" ".join(plano.split()[:3]) or "esa plaga")
+        await self._escalar(
+            "modelo",
+            f"Plaga fuera de catálogo: {descripcion or nombre}",
+            f"Con toda honestidad, eso que me cuentas ({nombre}) no es de las "
+            "plagas que atiendo por aquí, y prefiero no improvisarte un "
+            "tratamiento ni un precio. " + self._puente(),
+        )
+        return {"ok": True, "estado": "fuera_de_catalogo", "instrucciones": "Ya se le avisó al lead y se le pasó al dueño."}
+
+    async def _atasco(self, d: diagnostico.Diagnostico, base: dict[str, Any]) -> dict[str, Any]:
+        """La comparación simple no cerró: tarjeta → foto → dueño."""
+        caso = self.caso
+        if self.texto_garantizado:
+            # Otra llamada en el MISMO turno: el atasco ya se contó y su texto
+            # (tarjeta o foto) ya va a salir. Contarlo dos veces brincaba de la
+            # tarjeta a la foto sin que el lead viera la tarjeta.
+            base["instrucciones"] = "Ya se le mandó la comparación; espera su respuesta."
+            return base
+        caso.atascos += 1
+        es_cucaracha = (d.plaga or "").startswith("cucaracha")
+        if caso.atascos >= ATASCOS_PARA_DUENO or (caso.foto_pedida and not self._hay_imagen):
+            await self._escalar(
+                "modelo",
+                f"No se pudo identificar la plaga por chat ({caso.candidata})",
+                "Para no darte un diagnóstico equivocado, prefiero que lo revise "
+                "directamente una persona. " + self._puente(),
+            )
+            base["instrucciones"] = "Ya se le avisó al lead y se le pasó al dueño."
+            return base
+        if not es_cucaracha or caso.atascos >= ATASCOS_PARA_FOTO:
+            caso.foto_pedida = True
+            self.texto_garantizado = catalogo.OFERTA_FOTO
+            base["instrucciones"] = "Ya se le pidió una foto al lead. No agregues nada."
+            return base
+        caso.tarjetas += 1
+        caso.turno_tarjeta = caso.turno
+        self.texto_garantizado = catalogo.TARJETA_CUCARACHAS
+        base["instrucciones"] = (
+            "Ya se le envió al lead la tarjeta comparativa de las dos cucarachas. "
+            "No agregues nada. Cuando conteste cuál se parece, llama "
+            "identificar_plaga con eligio_alemana o eligio_americana y su cita."
+        )
+        return base
+
+    # ---------------------------------------------------------- cotización ---
+
+    async def _cotizar(self, args: dict[str, Any]) -> dict[str, Any]:
+        caso = self.caso
+        if caso.recurrente:
+            return {
+                "ok": False,
+                "error": "cliente_recurrente",
+                "instrucciones": "Ya es cliente: jamás se le vuelve a cotizar lo que ya pagó. Pásalo con el dueño.",
+            }
+        if not caso.dentro:
+            return {
+                "ok": False,
+                "error": "falta_cobertura",
+                "instrucciones": (
+                    "Antes de cotizar hay que confirmar que se atiende su zona: "
+                    "pregúntale su colonia o código postal y llama verificar_cobertura. "
+                    "No digas ninguna cifra."
+                ),
+            }
+        if caso.plaga is None:
+            return {
+                "ok": False,
+                "error": "falta_identificar",
+                "instrucciones": (
+                    "Todavía no está confirmada la plaga: sigue con identificar_plaga. "
+                    "Dile que el precio depende de qué plaga sea y hazle la pregunta "
+                    "de identificación que falta. No digas ninguna cifra."
+                ),
+            }
+        if caso.turno_plaga == caso.turno:
+            return {
+                "ok": False,
+                "error": "primero_el_tratamiento",
+                "instrucciones": (
+                    "Acabas de confirmar la plaga. En ESTE mensaje explica el "
+                    "tratamiento y haz la pregunta de urgencia; el precio va en "
+                    "cuanto el lead diga que le interesa. No digas ninguna cifra."
+                ),
+            }
+
+        self._cotizaciones += 1
+        if self._cotizaciones > 2 and caso.cotizacion is None:
+            # En la autoprueba el modelo llamó cotizar 7 veces seguidas con el
+            # mismo dato no dicho y el turno se quedó sin texto.
+            pendiente = precios.cotizar(caso.plaga, caso.variables)
+            return {
+                "ok": False,
+                "error": "deja_de_llamar_cotizar",
+                "instrucciones": (
+                    "No vuelvas a llamar cotizar en este turno. Escríbele al lead y "
+                    "pregúntale el dato que falta"
+                    + (f": «{pendiente.pregunta}»" if pendiente.estado == "falta" else "")
+                    + ". Con su respuesta lo vuelves a intentar."
+                ),
+            }
+        nuevas = precios.limpiar_variables(args)
+        # Solo los datos que pide el precio de ESTA plaga (en la autoprueba el
+        # modelo mandaba refrigeradores y baños para una araña).
+        regla = (catalogo.PLAGAS.get(caso.plaga) or {}).get("precio") or {}
+        utiles = set(regla.get("variables", []))
+        if regla.get("tipo") == "por_inmueble":
+            utiles.add("refrigeradores")  # solo se pregunta si es local comercial
+        nuevas = {k: v for k, v in nuevas.items() if k in utiles}
+        supuestas = [k for k in nuevas if not self._dato_dicho(k, nuevas[k], args)]
+        for clave in supuestas:
+            nuevas.pop(clave)  # lo supuso el modelo: el lead nunca lo dijo
+        # Al revés también: lo que el lead SÍ dijo y el modelo no mandó. En la
+        # autoprueba, a quien abrió con «un depa de 70 metros» se le volvió a
+        # preguntar cuántos metros eran.
+        if "tipo_inmueble" in utiles and not (nuevas.get("tipo_inmueble") or caso.variables.get("tipo_inmueble")):
+            if (inmueble := self.inmueble_dicho()) is not None:
+                nuevas["tipo_inmueble"] = inmueble
+        if "m2" in utiles and not (nuevas.get("m2") or caso.variables.get("m2")):
+            if (m2 := self.m2_dicho()) is not None:
+                nuevas["m2"] = m2
+        caso.variables.update(nuevas)
+        cot = precios.cotizar(caso.plaga, caso.variables)
+        nombre = catalogo.PLAGAS[caso.plaga]["nombre"]
+        datos = ", ".join(f"{k}={v}" for k, v in cot.variables.items())
+        await self._ficha({"plaga": nombre, "tipo_inmueble": cot.variables.get("tipo_inmueble")})
+
+        if cot.estado == "falta":
+            aviso = ""
+            if supuestas:
+                aviso = (
+                    f" OJO: mandaste {', '.join(supuestas)} sin que el lead lo dijera; "
+                    "esos datos los da el lead, no se suponen."
+                )
+            return {
+                "ok": False,
+                "estado": "falta_un_dato",
+                "falta": cot.falta,
+                "pregunta_siguiente": cot.pregunta,
+                "instrucciones": (
+                    "Falta ese dato para el precio. Si el lead ya lo dijo antes en "
+                    "la conversación, vuelve a llamar cotizar incluyéndolo. Si no, "
+                    "hazle la `pregunta_siguiente` (UNA sola pregunta) y espera. "
+                    "No digas ninguna cifra todavía." + aviso
+                ),
+            }
+        if cot.estado == "requiere_dueno":
+            await self._ficha({"datos_cotizacion": datos})
+            await self._escalar(
+                "modelo",
+                f"Cotización manual — {nombre}: {cot.motivo}. Datos: {datos or 'sin datos'}",
+                f"Para {nombre.lower()}, {cot.motivo}. Ya le pasé tus datos "
+                f"{self._al_dueno()} para que te dé el precio exacto por aquí. "
+                + self._puente(),
+            )
+            return {"ok": True, "estado": "lo_cotiza_el_dueno", "instrucciones": "Ya se le avisó al lead y se le pasó al dueño."}
+
+        if caso.cotizacion and caso.cotizacion.get("linea") == cot.linea_precio:
+            # Misma cotización que ya tiene: reenviarle el resumen entero en
+            # vez de contestar lo que preguntó (en la autoprueba: «¿y si
+            # necesito factura?» → el resumen otra vez) es repetirse.
+            return {
+                "ok": True,
+                "estado": "ya_cotizado",
+                "precio": cot.linea_precio,
+                "instrucciones": (
+                    "Ya tiene esta misma cotización: NO se la reenvíes. Contesta lo "
+                    "que te preguntó y, si hace falta, repite la línea de precio tal cual."
+                ),
+            }
+        bloque = precios.bloque_de_cierre(cot)
+        caso.cotizacion = {
+            "precio": cot.precio, "linea": cot.linea_precio, "bloque": bloque,
+            "turno": caso.turno,
+        }
+        caso.aceptada = False
+        self.cotizado = True
+        pregunta = (
+            precios.PREGUNTA_DE_CIERRE if self._ctx.agenda_enabled
+            else "¿Te gustaría que coordinemos tu visita?"
+        )
+        self.texto_garantizado = f"{bloque}\n\n{pregunta}"
+        await self._ficha({"cotizacion": cot.linea_precio, "datos_cotizacion": datos, "calificado": True})
+        return {
+            "ok": True,
+            "estado": "cotizado",
+            "precio": cot.linea_precio,
+            "instrucciones": (
+                "El resumen de la cotización ya se le envía al lead tal cual, con "
+                "la pregunta de si quiere agendar. No lo reescribas ni agregues nada."
+            ),
+        }
+
+    # ------------------------------------------------------------- agenda ---
+
+    def _miercoles(self, n: int = 2) -> list[str]:
+        """Las próximas `n` fechas del día al que está limitada su zona."""
+        dia = self.caso.cobertura.get("dia_restringido")
+        hoy = datetime.now(_zona_del_negocio(self._ctx)).date()
+        fechas: list[str] = []
+        d = hoy + timedelta(days=1)
+        while len(fechas) < n:
+            if d.weekday() == dia:
+                fechas.append(d.isoformat())
+            d += timedelta(days=1)
+        return fechas
+
+    async def _propose_slots(self, args: dict[str, Any]) -> dict[str, Any]:
+        caso = self.caso
+        if caso.cotizacion is None:
+            return {
+                "ok": False,
+                "error": "falta_cotizacion",
+                "instrucciones": (
+                    "No se ofrecen horarios antes de que el lead tenga su "
+                    "cotización y la acepte. Sigue el PASO ACTUAL."
+                ),
+            }
+        if caso.cotizacion.get("turno") == caso.turno:
+            return {
+                "ok": False,
+                "error": "espera_su_respuesta",
+                "instrucciones": "Acabas de darle el precio: espera a que diga que sí quiere agendar.",
+            }
+        dia = caso.cobertura.get("dia_restringido")
+        if dia is None:
+            res = await super()._propose_slots(args)
+        else:
+            nombre = caso.cobertura.get("dia_nombre")
+            pedida = str(args.get("fecha") or "")
+            try:
+                fechas = [pedida] if date.fromisoformat(pedida).weekday() == dia else None
+            except ValueError:
+                fechas = self._miercoles()
+            if fechas is None:
+                return {
+                    "ok": False,
+                    "error": "dia_no_disponible_en_su_zona",
+                    "instrucciones": (
+                        f"En su zona solo se da servicio los {nombre}. Díselo con "
+                        f"honestidad y ofrécele un {nombre}: vuelve a llamar "
+                        "propose_slots sin fecha."
+                    ),
+                }
+            res = {"ok": False, "error": "sin_disponibilidad"}
+            for fecha in fechas:
+                res = await super()._propose_slots({"fecha": fecha})
+                if res.get("ok"):
+                    break
+            if res.get("ok"):
+                res["instrucciones"] = (
+                    f"En su zona solo se atiende en {nombre}: ofrécele estos "
+                    "horarios (máximo 3, con su etiqueta tal cual) y dile por qué "
+                    f"es {nombre}."
+                )
+        if res.get("ok"):
+            caso.aceptada = True
+        return res
+
+    async def _book_session(self, args: dict[str, Any]) -> dict[str, Any]:
+        caso = self.caso
+        supuestos: list[str] = []
+        for campo in DIRECCION_CAMPOS:
+            valor = str(args.get(campo) or "").strip()
+            if not valor or valor.lower() in ("n/a", "na", "no aplica", "-", "s/n"):
+                continue
+            if campo != "referencia" and not self._lo_escribio_el_lead(valor):
+                supuestos.append(campo)  # lo dedujo el modelo: no cuenta
+                continue
+            caso.direccion[campo] = valor[:160]
+        if caso.cotizacion is None or not caso.aceptada:
+            return {
+                "ok": False,
+                "error": "falta_aceptar_cotizacion",
+                "instrucciones": "No se agenda sin cotización aceptada y horarios ofrecidos. Sigue el PASO ACTUAL.",
+            }
+        chosen, error = await self._resolve_offered(args, "book_session")
+        if error is not None or chosen is None:
+            return error or {"ok": False, "error": "slot_no_ofrecido"}
+        faltan = caso.direccion_faltante()
+        if faltan:
+            nombres = ", ".join(DIRECCION_NOMBRES[c] for c in faltan)
+            aviso = ""
+            if supuestos:
+                aviso = (
+                    " OJO: mandaste "
+                    + ", ".join(DIRECCION_NOMBRES[c] for c in supuestos)
+                    + " sin que el lead lo escribiera; la dirección la da el lead, "
+                    "no se deduce."
+                )
+            return {
+                "ok": False,
+                "error": "falta_direccion",
+                "falta": faltan,
+                "instrucciones": (
+                    f"El horario {chosen.label} ya quedó elegido; no lo vuelvas a "
+                    f"preguntar. Para la visita falta la dirección escrita: {nombres}. "
+                    "Pídeselo en UNA sola pregunta y, con su respuesta, vuelve a "
+                    "llamar book_session con el mismo start_utc." + aviso
+                ),
+            }
+        await self._ficha({"direccion": caso.direccion_texto()})
+        if not self._aprobacion:
+            return await super()._book_session(args)
+        return await self._solicitar_visita(chosen)
+
+    def _dato_dicho(self, clave: str, valor: Any, crudos: dict[str, Any]) -> bool:
+        """¿El lead dijo ese dato del inmueble, o lo supuso el modelo?
+
+        En la autoprueba el modelo cotizó «departamento» a quien nunca dijo qué
+        era (tenía casa): el precio salió del catálogo, pero de un dato inventado.
+        """
+        mensajes = [normalizar(m) for m in self._mensajes_lead]
+        plano = " ".join(mensajes)
+        # «90m2», «10x8» y «15mts» traen el número pegado: se separa.
+        palabras = set(re.findall(r"\d+(?:\.\d+)?|[a-zñ]+", plano.replace(",", "")))
+        if clave == "tipo_inmueble":
+            patrones = _DICE_INMUEBLE.get(str(valor), ())
+            return any(re.search(p, m) for p in patrones for m in mensajes)
+        if clave == "m2":
+            largo, ancho = crudos.get("largo"), crudos.get("ancho")
+            if largo and ancho and all(self._numero_dicho(x, palabras, plano) for x in (largo, ancho)):
+                return True  # lo dijo como largo por ancho
+            if crudos.get("m2") in (None, ""):
+                return False
+        return self._numero_dicho(crudos.get(clave, valor), palabras, plano)
+
+    def inmueble_dicho(self) -> str | None:
+        """El tipo de inmueble que el lead dijo, si dijo uno solo."""
+        mensajes = [normalizar(m) for m in self._mensajes_lead]
+        dichos = {
+            tipo for tipo, patrones in _DICE_INMUEBLE.items()
+            if any(re.search(p, m) for p in patrones for m in mensajes)
+        }
+        return dichos.pop() if len(dichos) == 1 else None
+
+    def m2_dicho(self) -> float | None:
+        """Los metros cuadrados que el lead dijo, si dijo una sola cifra."""
+        dichos: set[int] = set()
+        for m in self._mensajes_lead:
+            plano = normalizar(m)
+            # «10 metros de largo por 8 de ancho» son medidas, no el área: esas
+            # las multiplica el modelo (largo y ancho) y aquí no se adivinan.
+            if re.search(r"\blargo\b|\bancho\b|\bfondo\b|\bfrente\b|\d\s*(x|por)\s*\d", plano):
+                continue
+            dichos.update(
+                int(n) for n in re.findall(
+                    # «a 50 metros del metro» es una distancia, no un área.
+                    r"\b(\d{2,4})\s*(?:m2\b|mts?2?\b|metros?(?:\s+cuadrados)?\b)(?!\s+(?:de|del|a)\b)",
+                    plano,
+                )
+            )
+        return float(dichos.pop()) if len(dichos) == 1 else None
+
+    @staticmethod
+    def _numero_dicho(valor: Any, palabras: set[str], plano: str) -> bool:
+        n = precios._numero(valor)
+        if n is None:
+            return False
+        if n == 0 and re.search(r"\bningun|\bno (tengo|hay|tenemos)\b|\bcero\b|\bninguno\b", plano):
+            return True
+        entero = int(n) if float(n).is_integer() else None
+        candidatos = {f"{n:g}"} | ({str(entero)} if entero is not None else set())
+        if entero is not None:
+            candidatos |= {w for w, v in _NUMEROS.items() if v == entero}
+        return bool(candidatos & palabras)
+
+    def _lo_escribio_el_lead(self, valor: str) -> bool:
+        """¿Alguna palabra de ese dato aparece en lo que escribió el lead?"""
+        piezas = set(re.findall(r"[a-z0-9ñ]+", normalizar(valor)))
+        dichas: set[str] = set()
+        for m in self._mensajes_lead:
+            dichas.update(re.findall(r"[a-z0-9ñ]+", normalizar(m)))
+        return bool(piezas & dichas)
+
+    async def _solicitar_visita(self, chosen: OfferedSlot) -> dict[str, Any]:
+        """Candado de negocio (sección 9.3): la visita queda PENDIENTE de aprobación.
+
+        No se toca el calendario real: la solicitud se anota en la ficha y la
+        conversación se le pasa al dueño, que es quien la confirma.
+        """
+        caso = self.caso
+        dueno = catalogo.NEGOCIO["dueno"]
+        info = catalogo.PLAGAS[caso.plaga or ""] if caso.plaga else {}
+        # La ficha y el expediente guardan el día sin «hoy»/«mañana»: se leen
+        # días después y para entonces ya no es mañana.
+        dia = re.sub(r"^(hoy|mañana)\s+", "", chosen.label)
+        cuando = f"para {chosen.label}" if dia != chosen.label else f"para el {chosen.label}"
+        caso.cita = {
+            "label": dia,
+            "start_utc": chosen.start_utc.isoformat(),
+            "estado": "pendiente_de_aprobacion",
+        }
+        await self._ctx.store.clear_offered_slots(self._conv.id)
+        self.booked = True
+        self.handoff_reason = "cliente"
+        caso.escalado = f"Solicitud de visita: {dia}"
+        await self._ficha({
+            "cita_solicitada": dia,
+            "calificado": True,
+            "resultado": "agendo",
+            "notas": (
+                f"SOLICITUD DE VISITA pendiente de aprobar: {dia} — "
+                f"{info.get('nombre', '')} — {caso.cotizacion['linea'] if caso.cotizacion else ''} — "
+                f"{caso.direccion_texto()}"
+            )[:480],
+        })
+        saludo = f"Listo, {self._nombre_lead}" if self._nombre_lead else "Listo"
+        partes = [
+            f"✅ {saludo}: registré tu solicitud de visita {cuando}.",
+            f"📍 {caso.direccion_texto()}",
+            f"{dueno[0].upper()}{dueno[1:]} te la confirma por aquí en breve; "
+            "mientras tanto queda como solicitud.",
+        ]
+        if info.get("contencion"):
+            partes.append(f"⚠️ {info['contencion']}")
+        self.texto_garantizado = "\n\n".join(partes)
+        return {
+            "ok": True,
+            "estado": "solicitud_registrada",
+            "instrucciones": "Ya se le envió al lead la confirmación de su solicitud. No agregues nada.",
+        }
+
+# Cómo dice la gente cada tipo de inmueble.
+_DICE_INMUEBLE: dict[str, tuple[str, ...]] = {
+    # «Toda la casa» o «en mi casa» los dice también quien vive en un depa:
+    # cuenta «casa» solo cuando se dice como TIPO de inmueble.
+    "casa": (
+        r"^\W*casa\b", r"\b(es|vivo en|tengo|son|una|tipo) (una )?casa\b",
+        # «…detrás del refri. Casa en la Del Valle»: al empezar una frase.
+        r"[.!?;:]\s*casa\b", r",\s*casa (en|de)\b",
+        r"\bcasa (sola|propia|habitacion|de (un|dos|tres|\d)|grande|chica)\b",
+        r"\bcasita\b", r"\bresidencia\b",
+    ),
+    "departamento": (
+        r"\bdep(a|as|to|tos|artamento|artamentos)\b", r"\bapartamento\b", r"\bcondominio\b",
+    ),
+    "local_comercial": (
+        r"\blocal\b", r"\bnegocio\b", r"\brestauran", r"\bcomercio\b", r"\boficina",
+        # «La bodega» de una casa no es un local: solo «es/tengo una bodega».
+        r"\b(es|tengo) una bodega\b", r"\btienda\b", r"\bcafeteria\b", r"\btaqueria\b",
+        r"\bfonda\b",
+    ),
+    "edificio": (r"\bedificio",),
+}
+_NUMEROS = {
+    # «un» y «una» no: «vi una araña» no dice que haya un baño.
+    "dos": 2, "tres": 3, "cuatro": 4, "cinco": 5,
+    "seis": 6, "siete": 7, "ocho": 8, "nueve": 9, "diez": 10, "once": 11,
+    "doce": 12, "quince": 15, "veinte": 20, "treinta": 30, "cuarenta": 40,
+    "cincuenta": 50, "sesenta": 60, "setenta": 70, "ochenta": 80, "noventa": 90,
+    "cien": 100, "doscientos": 200, "trescientos": 300,
+}
+
+
+def bloque_de_tratamiento(plaga: str, texto_del_lead: str = "") -> str:
+    """Lo que se le dice al lead del tratamiento al confirmar la plaga: solo catálogo."""
+    info = catalogo.PLAGAS[plaga]
+    visitas = info["visitas"][:1].upper() + info["visitas"][1:]
+    lineas = [f"🛠️ {info.get('resumen') or info['procedimiento']}", f"🗓️ {visitas}."]
+    if info.get("tranquilidad"):
+        lineas.insert(0, f"💚 {info['tranquilidad']}")
+    # La precaución de la araña va solo si el lead describió una peligrosa
+    # (sección 4.3): decírsela a todo el que tiene arañas es alarmar de más.
+    if info.get("precaucion") and re.search(catalogo.ARANA_PELIGROSA, normalizar(texto_del_lead)):
+        lineas.append(f"⚠️ {info['precaucion']}")
+    return "\n".join(lineas) + f"\n\n{catalogo.PREGUNTA_URGENCIA}"
+
+
+def _alias(texto: str) -> str | None:
+    """La plaga del catálogo a la que se refiere un texto, o None."""
+    plano = normalizar(texto)
+    # El catálogo de alias va de lo específico a lo general: gana el primero.
+    return next((clave for patron, clave in catalogo.ALIAS if re.search(patron, plano)), None)
+
+
+def _misma_familia(a: str, b: str) -> bool:
+    """¿Las dos claves hablan de la misma plaga? (cucaracha* es una familia)."""
+    a, b = (a or "").strip(), (b or "").strip()
+    if not a or not b:
+        return True
+    if a.startswith("cucaracha") and b.startswith("cucaracha"):
+        return True
+    return a == b

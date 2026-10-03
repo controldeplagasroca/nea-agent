@@ -3,24 +3,9 @@ from __future__ import annotations
 
 import asyncio
 import json
-from datetime import datetime, timezone
-
-import httpx
 
 from app.llm import LlmExhausted, LlmReply, ToolCall
-from app.state import OfferedSlot, utcnow
-from app.turn import BOOK_SESSION_CHOICE, VERIFICAR_COBERTURA_CHOICE
-from tests.conftest import (
-    CRM_CONV_ID,
-    CRM_URL,
-    IDENTITY,
-    FakeLLM,
-    crm_context,
-    mock_crm_basics,
-    wa_body,
-)
-
-OWNER_ID = "525500000000"
+from tests.conftest import FakeLLM, mock_crm_basics, wa_body
 
 
 async def test_handoff_despedida_primero_pausa_despues(ctx, client, respx_mock):
@@ -89,34 +74,6 @@ async def test_turno_con_route_out_cierra_sin_seguimiento(ctx, client, respx_moc
     assert conv.followup_due_at is None
 
 
-async def test_cancel_session_cierra_sin_handoff_ni_seguimiento(ctx, client, respx_mock):
-    """Cancelar deja la conversación cerrada (como book/route_out) pero SIN
-    pasar por handoff.reason — antes esto pausaba la IA innecesariamente."""
-    routes = mock_crm_basics(respx_mock)
-    conv = await ctx.store.get_or_create_conversation(IDENTITY)
-    await ctx.store.save_calendar_booking(
-        conv.id, "evt_1", "alemana", utcnow(), utcnow()
-    )
-    ctx.llm.replies = [
-        LlmReply(
-            content=None,
-            tool_calls=[ToolCall(id="tc1", name="cancel_session", arguments={})],
-        ),
-        LlmReply(content="Listo, tu cita quedó cancelada. Cualquier cosa aquí estoy."),
-    ]
-    await client.post(
-        "/webhook", content=wa_body(text="quiero cancelar mi cita, no estaré")
-    )
-    await asyncio.sleep(0.25)
-
-    assert routes["messages"].call_count == 1
-    assert routes["handoff"].call_count == 0  # NO es handoff
-    assert ctx.calendar.cancel_calls == ["evt_1"]
-    conv_after = next(iter(ctx.store.conversations.values()))
-    assert conv_after.phase == "cerrada"
-    assert conv_after.followup_due_at is None
-
-
 async def test_los_turnos_de_una_conversacion_no_se_encinan(ctx, client, respx_mock):
     """Un mensaje que llega tarde NO abre un turno con el contexto de antes.
 
@@ -127,9 +84,9 @@ async def test_los_turnos_de_una_conversacion_no_se_encinan(ctx, client, respx_m
     routes = mock_crm_basics(respx_mock)
 
     class LlmLento(FakeLLM):
-        async def complete(self, messages, tools=None, tool_choice=None):
+        async def complete(self, messages, tools=None):
             await asyncio.sleep(0.3)
-            return await super().complete(messages, tools, tool_choice)
+            return await super().complete(messages, tools)
 
     ctx.llm = LlmLento()
 
@@ -152,154 +109,78 @@ async def test_los_turnos_de_una_conversacion_no_se_encinan(ctx, client, respx_m
     )
 
 
-async def test_forzar_verificar_cobertura_si_lead_menciona_colonia(ctx, client, respx_mock):
-    """Regresión (2026-09-06): con tool_choice="auto" el LLM respondió "está
-    en zona de cobertura" tres veces seguidas SIN llamar verificar_cobertura
-    ni una sola vez, aunque la tool estaba disponible y el chasis la exigía
-    en prosa. La ronda 0 del turno debe forzarla cuando el lead menciona su
-    colonia/ubicación -- no basta con confiar en que el modelo la use solo."""
-    mock_crm_basics(respx_mock)
+async def test_el_texto_junto_a_una_herramienta_no_se_da_por_dicho(ctx, client, respx_mock):
+    """GLM escribe el mensaje Y llama la herramienta en la misma respuesta.
+
+    Con ese texto a la vista en la ronda siguiente, el modelo lo daba por
+    enviado y contestaba relleno («¡Éxito con tus ventas! 🙌»), que era lo
+    único que le llegaba al lead. Producción, aishiagency, 18 sep 2026.
+    """
+    routes = mock_crm_basics(respx_mock)
     ctx.llm.replies = [
         LlmReply(
-            content=None,
+            content="Anoto eso 👌",  # preámbulo: NO debe salir ni quedar como dicho
             tool_calls=[
-                ToolCall(
-                    id="tc1",
-                    name="verificar_cobertura",
-                    arguments={
-                        "colonia": "Buenos Aires",
-                        "alcaldia_municipio": "",
-                        "codigo_postal": "",
-                    },
-                )
+                ToolCall(id="t1", name="update_ficha", arguments={"rubro": "inmobiliario"}),
+                ToolCall(id="t2", name="route_out", arguments={}),
             ],
         ),
-        LlmReply(content="¿Me compartes tu código postal para confirmar cobertura?"),
+        LlmReply(content="Esta campaña es para agencias de servicios digitales, así que por ahora no encaja. ¡Éxito con tus ventas!"),
     ]
-    await client.post("/webhook", content=wa_body(text="Vivo en la Colonia Buenos Aires"))
+    await client.post("/webhook", content=wa_body(text="solo vendo propiedades"))
     await asyncio.sleep(0.25)
 
-    assert ctx.llm.calls[0]["tool_choice"] == VERIFICAR_COBERTURA_CHOICE
-    # ronda 1 (tras ejecutar la tool) vuelve a "auto": no atora el resto del turno
-    assert ctx.llm.calls[1]["tool_choice"] is None
+    textos = [json.loads(c.request.content)["text"] for c in routes["messages"].calls]
+    assert textos == ["Esta campaña es para agencias de servicios digitales, así que por ahora no encaja. ¡Éxito con tus ventas!"]
+    llamada_herramientas = ctx.llm.calls[1]["messages"][-3]
+    assert llamada_herramientas["role"] == "assistant" and llamada_herramientas["tool_calls"]
+    assert llamada_herramientas["content"] is None
+    assert routes["ficha"].call_count == 2  # las herramientas sí corrieron
 
 
-async def test_no_forzar_verificar_cobertura_sin_mencion_de_ubicacion(ctx, client, respx_mock):
+async def test_no_repite_palabra_por_palabra_un_mensaje_ya_enviado(ctx, client, respx_mock):
+    """El saludo del principio a media conversación: se le pide otra."""
     routes = mock_crm_basics(respx_mock)
-    ctx.llm.replies = [LlmReply(content="¡Hola! ¿Qué plaga tienes?")]
-    await client.post("/webhook", content=wa_body(text="Hola, buenas tardes"))
+    saludo = "¡Hola Guillermo! Soy Nea, de AISHIA. Para ubicarte rápido, ¿qué servicio vendes tú?"
+    ctx.llm.replies = [LlmReply(content=saludo)]
+    await client.post("/webhook", content=wa_body(text="hola", wamid="wamid.r1"))
     await asyncio.sleep(0.25)
 
-    assert routes["messages"].call_count == 1
-    assert ctx.llm.calls[0]["tool_choice"] is None
-
-
-async def test_forzar_book_session_si_hay_slots_ofrecidos_y_lead_confirma(
-    ctx, client, respx_mock
-):
-    """Regresión (2026-09-07): tras el lead confirmar un horario ya
-    ofrecido, el modelo respondió "Tu cita queda agendada..." en puro texto
-    SIN llamar book_session ni una sola vez -- una alucinación de que la
-    acción ya ocurrió cuando nunca se ejecutó (0 requests a Google Calendar
-    ese turno). Si hay slots ofrecidos y el mensaje suena a confirmación, la
-    ronda 0 debe forzar book_session."""
-    mock_crm_basics(respx_mock)
-    conv = await ctx.store.get_or_create_conversation(IDENTITY)
-    await ctx.store.replace_offered_slots(
-        conv.id,
-        [
-            OfferedSlot(
-                conversation_id=conv.id,
-                start_utc=datetime(2026, 7, 20, 16, 0, tzinfo=timezone.utc),
-                end_utc=datetime(2026, 7, 20, 17, 30, tzinfo=timezone.utc),
-                label="lunes 20 de julio, 10:00 am",
-                service_key="alemana",
-            )
-        ],
-    )
     ctx.llm.replies = [
-        LlmReply(
-            content=None,
-            tool_calls=[
-                ToolCall(
-                    id="tc1",
-                    name="book_session",
-                    arguments={
-                        "start_utc": "2026-07-20T16:00:00Z",
-                        "dia_confirmado": "martes a las 11",
-                        "direccion_completa": "",
-                    },
-                )
-            ],
-        ),
-        LlmReply(content="¿Me compartes la dirección completa para el técnico?"),
+        LlmReply(content=saludo),
+        LlmReply(content="Entendido: solo vendes propiedades. Esta campaña no encaja contigo."),
     ]
-    await client.post("/webhook", content=wa_body(text="martes a las 11"))
+    await client.post("/webhook", content=wa_body(text="solo vendo casas", wamid="wamid.r2"))
     await asyncio.sleep(0.25)
 
-    assert ctx.llm.calls[0]["tool_choice"] == BOOK_SESSION_CHOICE
-    assert ctx.llm.calls[1]["tool_choice"] is None
+    textos = [json.loads(c.request.content)["text"] for c in routes["messages"].calls]
+    assert textos == [saludo, "Entendido: solo vendes propiedades. Esta campaña no encaja contigo."]
+    correccion = ctx.llm.calls[-1]["messages"][-1]
+    assert correccion["role"] == "system" and "palabra por palabra" in correccion["content"]
 
 
-async def test_no_forzar_book_session_sin_slots_ofrecidos(ctx, client, respx_mock):
+async def test_una_nota_interna_no_le_llega_al_lead(ctx, client, respx_mock):
     routes = mock_crm_basics(respx_mock)
-    ctx.llm.replies = [LlmReply(content="¡Hola! ¿Qué plaga tienes?")]
-    # "sí" suena a confirmación, pero sin slots ofrecidos no hay nada que reservar
-    await client.post("/webhook", content=wa_body(text="si"))
+    ctx.llm.replies = [
+        LlmReply(content="(Registro actualizado — conversación cerrada con salida digna.)"),
+        LlmReply(content="Tienes razón, disculpa la repetición. ¡Éxito con tus ventas!"),
+    ]
+    await client.post("/webhook", content=wa_body(text="me repetiste lo mismo"))
     await asyncio.sleep(0.25)
 
-    assert routes["messages"].call_count == 1
-    assert ctx.llm.calls[0]["tool_choice"] is None
+    textos = [json.loads(c.request.content)["text"] for c in routes["messages"].calls]
+    assert textos == ["Tienes razón, disculpa la repetición. ¡Éxito con tus ventas!"]
 
 
-async def test_gate_aprobacion_dueno_no_llega_al_llm(ctx, client, respx_mock):
-    """Regresión: si el dueño responde "sí <folio>" a una cita pendiente, el
-    mensaje NUNCA debe llegar al LLM como si fuera un lead normal (mezclaría
-    su respuesta de aprobación con su propio flujo de pruebas)."""
-    ctx.settings.owner_wa_id = OWNER_ID
-    lead_conv = await ctx.store.get_or_create_conversation(IDENTITY)
-    pending = await ctx.store.create_pending_booking(
-        lead_conv.id,
-        CRM_CONV_ID,
-        "alemana",
-        datetime(2026, 7, 20, 16, 0, tzinfo=timezone.utc),
-        datetime(2026, 7, 20, 17, 30, tzinfo=timezone.utc),
-        "lunes 20 de julio, 10:00 am",
-        "Calle Amores 123, depto 4B",
-        "lunes a las 10",
-        utcnow(),
-    )
-    respx_mock.get(f"{CRM_URL}/api/bot/context", params={"waIdentity": OWNER_ID}).mock(
-        return_value=httpx.Response(200, json=crm_context(conv_id="cv_owner"))
-    )
-    respx_mock.put(f"{CRM_URL}/api/bot/ficha").mock(
-        return_value=httpx.Response(200, json={"ficha": {}, "stageMoved": False})
-    )
-    msg_route = respx_mock.post(f"{CRM_URL}/api/bot/messages").mock(
-        return_value=httpx.Response(200, json={"messageId": "msg_1"})
-    )
-
-    await client.post("/webhook", content=wa_body(text=f"si {pending.id}", frm=OWNER_ID))
-    await asyncio.sleep(0.25)
-
-    assert ctx.llm.calls == []  # nunca abrió turno de conversación normal
-    conv_ids = {json.loads(c.request.content)["conversationId"] for c in msg_route.calls}
-    assert "cv_owner" in conv_ids  # confirmación breve al dueño
-    assert CRM_CONV_ID in conv_ids  # aviso de cita confirmada al lead
-
-    resolved = await ctx.store.get_pending_booking(pending.id)
-    assert resolved.estado == "aprobado"
-
-
-async def test_dueno_sin_pendientes_sigue_flujo_normal(ctx, client, respx_mock):
-    """Sin ninguna cita pendiente, el número del dueño se comporta como
-    cualquier lead normal (así conserva su número de pruebas de siempre)."""
-    ctx.settings.owner_wa_id = OWNER_ID
+async def test_si_la_segunda_tambien_sale_mal_silencio_y_handoff(ctx, client, respx_mock):
     routes = mock_crm_basics(respx_mock)
-    ctx.llm.replies = [LlmReply(content="¡Hola! ¿Qué plaga tienes?")]
-
-    await client.post("/webhook", content=wa_body(text="hola", frm=OWNER_ID))
+    ctx.llm.replies = [
+        LlmReply(content="(nota interna)"),
+        LlmReply(content="[otra nota]"),
+    ]
+    await client.post("/webhook", content=wa_body(text="hola"))
     await asyncio.sleep(0.25)
 
-    assert len(ctx.llm.calls) == 1
-    assert routes["messages"].call_count == 1
+    assert routes["messages"].call_count == 0
+    assert routes["handoff"].call_count == 1
+    assert json.loads(routes["handoff"].calls[0].request.content)["reason"] == "error"
