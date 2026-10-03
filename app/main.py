@@ -8,6 +8,7 @@ fake, CRM contra respx) y manejan los workers a mano.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import re
 from contextlib import asynccontextmanager
@@ -19,15 +20,18 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
 from app.agenda import SondaDeAgenda
+from app.booking_reminders import ApprovalReminderWorker
 from app.coalesce import Coalescer
 from app.config import Settings
 from app.crm import CrmClient
 from app.crm_brains import BrainsCrmClient
 from app.dispatch import router as dispatch_router
+from app.gcal import GoogleCalendarClient
 from app.dispatch_worker import run as run_dispatch_worker
 from app.db import PgStore
 from app.followup import FollowupWorker
 from app.llm import OpenAiLlm
+from app.ops_sync import router as ops_sync_router
 from app.multiorg import (
     CrmSinOrganizacion,
     LlmSinOrganizacion,
@@ -121,6 +125,32 @@ async def _estado_del_relay(ctx: AppContext) -> dict[str, Any] | None:
     }
 
 
+def _build_calendar(settings: Settings) -> Any:
+    """El cliente de Google Calendar, o None si no está configurado.
+
+    None = Nea sigue ofreciendo los horarios de la agenda del CRM. Credenciales
+    mal escritas se avisan fuerte y se tratan igual: sin calendario, no hay
+    horarios inventados.
+    """
+    if not settings.calendar_configurado:
+        return None
+    try:
+        info = json.loads(settings.google_service_account_json)
+    except json.JSONDecodeError:
+        logger.error("agenda: GOOGLE_SERVICE_ACCOUNT_JSON no es JSON válido — sin Google Calendar")
+        return None
+    try:
+        return GoogleCalendarClient(
+            info,
+            settings.google_calendar_id,
+            settings.agent_timezone,
+            lead_hours=settings.booking_lead_hours,
+        )
+    except Exception:
+        logger.exception("agenda: no pude armar el cliente de Google Calendar — sin Google Calendar")
+        return None
+
+
 def create_app(ctx: AppContext | None = None) -> FastAPI:
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
@@ -191,6 +221,7 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
                     )
                 ),
                 registro=registro,
+                calendar=_build_calendar(settings),
             )
         c: AppContext = app.state.ctx
         _wire_coalescer(c)
@@ -237,6 +268,15 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
         ]
         if c.settings.cloud_mode:
             workers.append(asyncio.create_task(run_dispatch_worker(c), name="dispatch-worker"))
+        if c.calendar is not None and c.settings.owner_identity:
+            # Solicitudes de visita sin resolver: se revisan cada
+            # BOOKING_REMINDER_MINUTES (app/booking_reminders.py).
+            workers.append(
+                asyncio.create_task(
+                    ApprovalReminderWorker(c).run(), name="booking-reminder-worker"
+                )
+            )
+            logger.info("agenda: Google Calendar + aprobación del dueño activos")
         # El relay reenvía al CRM el payload crudo de Meta. En cloud el CRM YA
         # tiene el mensaje —él lo recibió y él nos lo despachó—, así que
         # reenviárselo sería duplicarlo en la bandeja del cliente.
@@ -265,6 +305,8 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
             await cancelar_pendientes(c)
             if own_resources:
                 await c.crm.aclose()
+                if c.calendar is not None:
+                    await c.calendar.aclose()
                 if c.registro is not None:
                     await c.registro.aclose()
                 await c.store.aclose()
@@ -279,6 +321,7 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
         app.include_router(dispatch_router)
     else:
         app.include_router(webhook_router)
+        app.include_router(ops_sync_router)
 
     @app.get("/health")
     async def health(request: Request):  # type: ignore[no-untyped-def]

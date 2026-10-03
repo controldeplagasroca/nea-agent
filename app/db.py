@@ -16,8 +16,10 @@ from app.dispatch_store import PgDispatchStore
 from app.state import (
     COLUMNAS_DE_CONVERSACION,
     BotMessage,
+    CalendarBooking,
     Conversation,
     OfferedSlot,
+    PendingBooking,
     PendingSend,
     RelayItem,
     RelayStats,
@@ -419,6 +421,169 @@ class PgStore(PgDispatchStore):
         )
 
     # ------------------------------------------------- envíos pendientes ---
+
+    # ----------------------------------------------------- agenda (gcal) ---
+
+    async def save_calendar_booking(
+        self,
+        conversation_id: int,
+        google_event_id: str,
+        service_key: str,
+        start_utc: datetime,
+        end_utc: datetime,
+    ) -> CalendarBooking:
+        row = await self.pool.fetchrow(
+            """
+            INSERT INTO calendar_bookings
+                (conversation_id, google_event_id, service_key, start_utc, end_utc)
+            VALUES ($1, $2, $3, $4, $5)
+            RETURNING *
+            """,
+            conversation_id,
+            google_event_id,
+            service_key,
+            start_utc,
+            end_utc,
+        )
+        assert row is not None
+        return _booking_from_row(row)
+
+    async def get_active_calendar_booking(
+        self, conversation_id: int
+    ) -> CalendarBooking | None:
+        row = await self.pool.fetchrow(
+            """
+            SELECT * FROM calendar_bookings
+            WHERE conversation_id = $1 AND canceled_at IS NULL
+            ORDER BY start_utc DESC LIMIT 1
+            """,
+            conversation_id,
+        )
+        return _booking_from_row(row) if row is not None else None
+
+    async def update_calendar_booking_time(
+        self, conversation_id: int, start_utc: datetime, end_utc: datetime
+    ) -> None:
+        await self.pool.execute(
+            """
+            UPDATE calendar_bookings SET start_utc = $2, end_utc = $3
+            WHERE conversation_id = $1 AND canceled_at IS NULL
+            """,
+            conversation_id,
+            start_utc,
+            end_utc,
+        )
+
+    async def cancel_calendar_booking(self, conversation_id: int) -> None:
+        await self.pool.execute(
+            """
+            UPDATE calendar_bookings SET canceled_at = now()
+            WHERE conversation_id = $1 AND canceled_at IS NULL
+            """,
+            conversation_id,
+        )
+
+    # -------------------------------------- aprobación del dueño (agenda) ---
+
+    async def create_pending_booking(
+        self,
+        conversation_id: int,
+        crm_conversation_id: str,
+        service_key: str,
+        start_utc: datetime,
+        end_utc: datetime,
+        label: str,
+        direccion: str,
+        dia_confirmado: str,
+        next_reminder_at: datetime,
+        costo_cotizado: float = 0.0,
+        telefono_cliente: str = "",
+        kind: str = "nueva",
+        google_event_id: str | None = None,
+    ) -> PendingBooking:
+        row = await self.pool.fetchrow(
+            """
+            INSERT INTO pending_bookings
+                (conversation_id, crm_conversation_id, service_key, start_utc,
+                 end_utc, label, direccion, dia_confirmado, next_reminder_at,
+                 costo_cotizado, telefono_cliente, kind, google_event_id)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+            RETURNING *
+            """,
+            conversation_id,
+            crm_conversation_id,
+            service_key,
+            start_utc,
+            end_utc,
+            label,
+            direccion,
+            dia_confirmado,
+            next_reminder_at,
+            costo_cotizado,
+            telefono_cliente,
+            kind,
+            google_event_id,
+        )
+        assert row is not None
+        return _pending_from_row(row)
+
+    async def get_pending_booking(self, pending_id: int) -> PendingBooking | None:
+        row = await self.pool.fetchrow(
+            "SELECT * FROM pending_bookings WHERE id = $1", pending_id
+        )
+        return _pending_from_row(row) if row is not None else None
+
+    async def list_pending_bookings_pendientes(self) -> list[PendingBooking]:
+        rows = await self.pool.fetch(
+            "SELECT * FROM pending_bookings WHERE estado = 'pendiente' ORDER BY id"
+        )
+        return [_pending_from_row(r) for r in rows]
+
+    async def list_pending_bookings_for_conversation(
+        self, conversation_id: int
+    ) -> list[PendingBooking]:
+        rows = await self.pool.fetch(
+            "SELECT * FROM pending_bookings WHERE conversation_id = $1 ORDER BY id",
+            conversation_id,
+        )
+        return [_pending_from_row(r) for r in rows]
+
+    async def due_booking_reminders(self, now: datetime) -> list[PendingBooking]:
+        rows = await self.pool.fetch(
+            """
+            SELECT * FROM pending_bookings
+            WHERE estado = 'pendiente' AND next_reminder_at <= $1
+            ORDER BY id
+            """,
+            now,
+        )
+        return [_pending_from_row(r) for r in rows]
+
+    async def mark_booking_reminder_sent(
+        self, pending_id: int, next_reminder_at: datetime
+    ) -> None:
+        await self.pool.execute(
+            """
+            UPDATE pending_bookings
+            SET reminders_sent = reminders_sent + 1, next_reminder_at = $2
+            WHERE id = $1
+            """,
+            pending_id,
+            next_reminder_at,
+        )
+
+    async def mark_pending_avisado(self, pending_id: int) -> None:
+        await self.pool.execute(
+            "UPDATE pending_bookings SET avisado_al_dueno = TRUE WHERE id = $1",
+            pending_id,
+        )
+
+    async def resolve_pending_booking(self, pending_id: int, estado: str) -> None:
+        await self.pool.execute(
+            "UPDATE pending_bookings SET estado = $2, resolved_at = now() WHERE id = $1",
+            pending_id,
+            estado,
+        )
 
     async def enqueue_pending_send(
         self,

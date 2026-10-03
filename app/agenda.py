@@ -122,6 +122,9 @@ async def agenda_vigente(ctx: Any) -> bool:
     Las pruebas que arman el contexto a mano no traen sonda, y ahí manda
     `ctx.agenda_enabled` tal cual lo dejaron.
     """
+    # Con agenda propia (Google Calendar) no depende de la bandera del CRM.
+    if getattr(ctx, "calendar", None) is not None:
+        return True
     sonda = getattr(ctx, "agenda_sonda", None)
     if sonda is None:
         return bool(ctx.agenda_enabled)

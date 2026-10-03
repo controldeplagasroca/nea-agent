@@ -18,6 +18,7 @@ from zoneinfo import ZoneInfo
 
 from app import media
 from app.agenda import agenda_vigente
+from app.approvals import atender_respuesta_del_dueno
 from app.config import canonical_identity
 from app.crm import CrmConflict, CrmError, CrmUnreachable
 from app.formato import a_whatsapp
@@ -475,6 +476,16 @@ async def run_turn(
         logger.info(
             "allowlist: %s fuera de ALLOWED_WA_IDS — relay sí, respuesta no", identity
         )
+        return
+
+    # Aprobación de visitas por el dueño («sí 12» / «no 12»): corre ANTES que
+    # todo lo demás para que su respuesta nunca llegue al modelo como lead.
+    if (
+        ctx.calendar is not None
+        and settings.owner_identity
+        and canonical_identity(identity) == settings.owner_identity
+        and await atender_respuesta_del_dueno(ctx, identity, inbound)
+    ):
         return
 
     # Vertical de plagas: el número del dueño (AVISO_DUENO_WA) no es un lead.

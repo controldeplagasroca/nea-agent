@@ -25,6 +25,7 @@ from app.crm import (
     SlotNotOffered,
     SlotTaken,
 )
+from app.gcal import CalendarError
 from app.profile import BusinessProfile
 from app.state import AppContext, Conversation, OfferedSlot
 
@@ -445,13 +446,16 @@ class ToolRuntime:
         # La conversación va SIEMPRE: es contra ella que el CRM registra la
         # oferta, y sin ella no hay nada reservable después.
         try:
-            consulta = await self._ctx.crm.consultar_huecos(
-                self._crm_conv_id,
-                date=fecha,
-                limit=MAX_OFFERED,
-                per_day=OFFER_PER_DAY,
-                days=OFFER_DAYS,
-            )
+            if self._ctx.calendar is not None:
+                consulta = await self._consultar_calendario(fecha)
+            else:
+                consulta = await self._ctx.crm.consultar_huecos(
+                    self._crm_conv_id,
+                    date=fecha,
+                    limit=MAX_OFFERED,
+                    per_day=OFFER_PER_DAY,
+                    days=OFFER_DAYS,
+                )
         except AgendaUnavailable:
             return self._sin_agenda()
         query = consulta.get("query") if isinstance(consulta.get("query"), dict) else None
@@ -475,6 +479,40 @@ class ToolRuntime:
             ),
             **_cobertura(query),
         }
+
+    def _servicio_agenda(self) -> str | None:
+        """Clave de app.gcal.SERVICE_RULES de lo que se va a agendar, o None.
+
+        La Nea genérica no sabe qué plaga es; el vertical de plagas lo
+        sobreescribe con la plaga confirmada del expediente.
+        """
+        return None
+
+    async def _consultar_calendario(self, fecha: str | None) -> dict[str, Any]:
+        """Los huecos del Google Calendar propio, con la misma forma que el CRM.
+
+        `{"slots": [...], "query": {...}}`. Con `fecha`, todas las horas de ese
+        día y su estado en `query` (así el día se puede dar por consultado).
+        Cualquier fallo del calendario se trata como «sin agenda»: el lead no
+        recibe horarios inventados y la conversación se pasa al dueño.
+        """
+        servicio = self._servicio_agenda()
+        if servicio is None:
+            logger.info("tools: sin regla de agenda para esta plaga — no se ofrecen horarios")
+            raise AgendaUnavailable("sin regla de agenda para esta plaga")
+        try:
+            if fecha:
+                slots, status = await self._ctx.calendar.get_day(
+                    servicio, date.fromisoformat(fecha)
+                )
+                return {"slots": slots, "query": {"date": fecha, "status": status}}
+            slots = await self._ctx.calendar.get_availability(
+                servicio, limit=MAX_OFFERED, per_day=OFFER_PER_DAY, days=OFFER_DAYS
+            )
+            return {"slots": slots, "query": None}
+        except CalendarError as exc:
+            logger.warning("tools: Google Calendar no respondió (%s)", exc)
+            raise AgendaUnavailable("Google Calendar no disponible") from exc
 
     async def _huecos_del_dia(
         self, fecha: str, raw: list[dict[str, Any]], query: dict[str, Any] | None

@@ -83,6 +83,9 @@ async def avisar_al_dueno(
     destino = ctx.settings.aviso_dueno_identity
     if not destino or canonical_identity(identidad_lead) == destino:
         return False
+    if caso.cita and caso.cita.get("folio"):
+        # Ya se le mandó la solicitud con folio («sí N» / «no N»): no duplicar.
+        return False
     nombre = str(((context or {}).get("contact") or {}).get("name") or "")
     texto = texto_del_aviso(caso, motivo, nombre, canonical_identity(identidad_lead))
     try:

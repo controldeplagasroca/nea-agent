@@ -27,7 +27,10 @@ from datetime import date, datetime, timedelta
 from typing import Any
 
 from app import hostility
+
+from app.approvals import enviar_solicitud_aprobacion, next_reminder
 from app.crm import CrmError
+from app.gcal import SERVICE_RULES, SERVICIO_DE_PLAGA
 from app.plagas import candados, catalogo, cobertura, diagnostico, precios
 from app.plagas.caso import DIRECCION_CAMPOS, DIRECCION_NOMBRES, Caso
 from app.plagas.texto import normalizar
@@ -257,6 +260,9 @@ class RuntimeDePlagas(ToolRuntime):
     @property
     def _texto_lead(self) -> str:
         return self._mensajes_lead[-1] if self._mensajes_lead else ""
+
+    def _servicio_agenda(self) -> str | None:
+        return SERVICIO_DE_PLAGA.get(self.caso.plaga or "")
 
     @property
     def _aprobacion(self) -> bool:
@@ -1072,6 +1078,37 @@ class RuntimeDePlagas(ToolRuntime):
             dichas.update(re.findall(r"[a-z0-9ñ]+", normalizar(m)))
         return bool(piezas & dichas)
 
+    async def _registrar_pendiente(self, chosen: OfferedSlot) -> None:
+        """Con agenda propia: la solicitud queda con folio y se le pide al dueño
+        «sí <folio>» / «no <folio>» (app/approvals.py). Aprobada, se crea el
+        evento en Google Calendar; el recordatorio la reintenta si no llegó.
+        Sin agenda propia o sin dueño configurado no hace nada."""
+        ctx = self._ctx
+        caso = self.caso
+        servicio = SERVICIO_DE_PLAGA.get(caso.plaga or "")
+        if ctx.calendar is None or not ctx.settings.owner_identity or servicio is None:
+            return
+        fin = chosen.end_utc or chosen.start_utc + timedelta(
+            minutes=SERVICE_RULES[servicio].duration_minutes
+        )
+        precio = (caso.cotizacion or {}).get("precio")
+        pending = await ctx.store.create_pending_booking(
+            conversation_id=self._conv.id,
+            crm_conversation_id=self._crm_conv_id,
+            service_key=servicio,
+            start_utc=chosen.start_utc,
+            end_utc=fin,
+            label=chosen.label,
+            direccion=caso.direccion_texto(),
+            dia_confirmado=chosen.label,
+            next_reminder_at=next_reminder(ctx.settings.booking_reminder_minutes),
+            costo_cotizado=float(precio) if isinstance(precio, (int, float)) else 0.0,
+            telefono_cliente=self._conv.wa_identity,
+        )
+        if caso.cita is not None:
+            caso.cita["folio"] = pending.id
+        await enviar_solicitud_aprobacion(ctx, pending)
+
     async def _solicitar_visita(self, chosen: OfferedSlot) -> dict[str, Any]:
         """Candado de negocio (sección 9.3): la visita queda PENDIENTE de aprobación.
 
@@ -1090,6 +1127,7 @@ class RuntimeDePlagas(ToolRuntime):
             "start_utc": chosen.start_utc.isoformat(),
             "estado": "pendiente_de_aprobacion",
         }
+        await self._registrar_pendiente(chosen)
         await self._ctx.store.clear_offered_slots(self._conv.id)
         self.booked = True
         self.handoff_reason = "cliente"
