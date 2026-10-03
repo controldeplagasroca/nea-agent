@@ -11,3 +11,6 @@ openai==2.54.0
 pydantic-settings==2.15.0
 tzdata==2026.4
 pypdf==6.19.0
+# Agenda propia contra Google Calendar (app/gcal.py)
+google-auth==2.59.1
+requests==2.34.2  # transporte síncrono que usa google-auth para refrescar el token

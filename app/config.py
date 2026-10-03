@@ -190,6 +190,24 @@ class Settings(BaseSettings):
     # 503 (falla cerrado: escribe datos de clientes).
     roca_ops_sync_secret: str = ""
 
+    # ── Agenda propia (Google Calendar) y aprobación del dueño ────────
+    #
+    # Con las dos variables de Google puestas, Nea ofrece los horarios del
+    # calendario compartido (duración y ventanas por plaga, app/gcal.py) en
+    # vez de los del CRM. Sin ellas, sigue usando la agenda del CRM.
+    google_service_account_json: str = ""  # JSON completo, en una línea
+    google_calendar_id: str = ""  # calendario compartido con esa cuenta de servicio
+    booking_lead_hours: float = 24.0  # anticipación mínima para agendar
+    # WhatsApp del dueño que aprueba las visitas ("sí <folio>" / "no <folio>").
+    # Si no se pone, se usa AVISO_DUENO_WA.
+    owner_wa_id: str = ""
+    # Cada cuántos minutos se revisa una solicitud sin resolver.
+    booking_reminder_minutes: float = 10.0
+    # Reenviar la solicitud al dueño en cada revisión aunque ya la tenga.
+    # False = el recordatorio es silencioso y solo reintenta si el aviso
+    # original nunca llegó.
+    approval_reminder_reenviar: bool = False
+
     # Cada cuántos segundos, como mucho, se le vuelve a preguntar al CRM si
     # agenda (la bandera AGENDA de Vocero). Antes se preguntaba solo al
     # arrancar: encenderla exigía reiniciar Nea. La pregunta la hace el primer
@@ -327,6 +345,18 @@ class Settings(BaseSettings):
             esperas.append(espera)
             total += espera
         return tuple(esperas)
+
+    @property
+    def owner_identity(self) -> str:
+        """Quién aprueba las visitas: OWNER_WA_ID, o AVISO_DUENO_WA. "" = nadie."""
+        crudo = self.owner_wa_id.strip()
+        if crudo:
+            return canonical_identity(crudo)
+        return self.aviso_dueno_identity
+
+    @property
+    def calendar_configurado(self) -> bool:
+        return bool(self.google_service_account_json.strip() and self.google_calendar_id.strip())
 
     @property
     def aviso_dueno_identity(self) -> str:

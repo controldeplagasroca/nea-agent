@@ -96,6 +96,53 @@ class OfferedSlot:
 
 
 @dataclass
+class CalendarBooking:
+    """Cita activa en Google Calendar, rastreada localmente porque el
+    calendario no sabe nada de conversation_id (reschedule_session la
+    necesita para saber qué evento mover)."""
+
+    id: int
+    conversation_id: int
+    google_event_id: str
+    service_key: str
+    start_utc: datetime
+    end_utc: datetime
+    created_at: datetime = field(default_factory=utcnow)
+
+
+
+@dataclass
+class PendingBooking:
+    """Cita que el lead confirmó pero que espera aprobación del dueño antes
+    de reservarse de verdad en Google Calendar (candado de negocio, no
+    técnico — ver book_session en app/tools.py)."""
+
+    id: int
+    conversation_id: int
+    crm_conversation_id: str
+    service_key: str
+    start_utc: datetime
+    end_utc: datetime
+    label: str
+    direccion: str
+    dia_confirmado: str
+    costo_cotizado: float = 0.0
+    telefono_cliente: str = ""
+    kind: str = "nueva"  # nueva (agendar) | reagendar (mover cita ya aprobada)
+    google_event_id: str | None = None  # solo kind="reagendar": evento a mover
+    estado: str = "pendiente"  # pendiente | aprobado | rechazado
+    reminders_sent: int = 0
+    next_reminder_at: datetime = field(default_factory=utcnow)
+    # True una vez que el dueño RECIBIÓ la solicitud. El recordatorio
+    # periódico solo reenvía si esto es False (un reintento real); si ya se
+    # le avisó, el recordatorio es SILENCIOSO y no vuelve a mandar el
+    # mensaje. En vivo el dueño recibió "Cita #6 por aprobar" tres veces
+    # cada 10 minutos.
+    avisado_al_dueno: bool = False
+    created_at: datetime = field(default_factory=utcnow)
+    resolved_at: datetime | None = None
+
+@dataclass
 class RelayItem:
     id: int
     body: bytes
@@ -217,6 +264,59 @@ class Store(Protocol):
     async def get_offered_slots(self, conversation_id: int) -> list[OfferedSlot]: ...
     async def clear_offered_slots(self, conversation_id: int) -> None: ...
 
+    # cita activa en Google Calendar (motor propio, ver app/gcal.py)
+    async def save_calendar_booking(
+        self,
+        conversation_id: int,
+        google_event_id: str,
+        service_key: str,
+        start_utc: datetime,
+        end_utc: datetime,
+    ) -> CalendarBooking: ...
+    async def get_active_calendar_booking(
+        self, conversation_id: int
+    ) -> CalendarBooking | None: ...
+    async def update_calendar_booking_time(
+        self, conversation_id: int, start_utc: datetime, end_utc: datetime
+    ) -> None: ...
+    async def cancel_calendar_booking(self, conversation_id: int) -> None: ...
+
+    # aprobación del dueño antes de reservar (candado de negocio)
+    async def create_pending_booking(
+        self,
+        conversation_id: int,
+        crm_conversation_id: str,
+        service_key: str,
+        start_utc: datetime,
+        end_utc: datetime,
+        label: str,
+        direccion: str,
+        dia_confirmado: str,
+        next_reminder_at: datetime,
+        costo_cotizado: float = 0.0,
+        telefono_cliente: str = "",
+        kind: str = "nueva",
+        google_event_id: str | None = None,
+    ) -> PendingBooking: ...
+    async def get_pending_booking(self, pending_id: int) -> PendingBooking | None: ...
+    async def list_pending_bookings_pendientes(self) -> list[PendingBooking]: ...
+    async def list_pending_bookings_for_conversation(
+        self, conversation_id: int
+    ) -> list[PendingBooking]:
+        """Todas (cualquier estado) — para detectar reutilización de la
+        dirección de OTRO domicilio mencionado antes en la misma conversación."""
+        ...
+    async def due_booking_reminders(self, now: datetime) -> list[PendingBooking]: ...
+    async def mark_booking_reminder_sent(
+        self, pending_id: int, next_reminder_at: datetime
+    ) -> None: ...
+    async def mark_pending_avisado(self, pending_id: int) -> None:
+        """Marca que el dueño YA recibió la solicitud de aprobación."""
+        ...
+    async def resolve_pending_booking(self, pending_id: int, estado: str) -> None:
+        """estado: 'aprobado' o 'rechazado' — marca resolved_at = now()."""
+        ...
+
     # cola de envíos pendientes (respuestas que no pudieron salir en el turno)
     async def enqueue_pending_send(
         self,
@@ -267,6 +367,8 @@ class MemoryStore(MemoryDispatchStore):
         self.messages: list[BotMessage] = []
         self.offered: dict[int, list[OfferedSlot]] = {}
         self.pending_sends: dict[int, PendingSend] = {}
+        self.calendar_bookings: dict[int, CalendarBooking] = {}
+        self.pending_bookings: dict[int, PendingBooking] = {}
 
     async def mark_processed(self, wa_message_id: str) -> bool:
         if wa_message_id in self.processed:
@@ -421,6 +523,119 @@ class MemoryStore(MemoryDispatchStore):
     async def clear_offered_slots(self, conversation_id: int) -> None:
         self.offered.pop(conversation_id, None)
 
+    async def save_calendar_booking(
+        self,
+        conversation_id: int,
+        google_event_id: str,
+        service_key: str,
+        start_utc: datetime,
+        end_utc: datetime,
+    ) -> CalendarBooking:
+        booking = CalendarBooking(
+            id=next(self._ids),
+            conversation_id=conversation_id,
+            google_event_id=google_event_id,
+            service_key=service_key,
+            start_utc=start_utc,
+            end_utc=end_utc,
+        )
+        self.calendar_bookings[conversation_id] = booking
+        return booking
+
+    async def get_active_calendar_booking(
+        self, conversation_id: int
+    ) -> CalendarBooking | None:
+        return self.calendar_bookings.get(conversation_id)
+
+    async def update_calendar_booking_time(
+        self, conversation_id: int, start_utc: datetime, end_utc: datetime
+    ) -> None:
+        booking = self.calendar_bookings.get(conversation_id)
+        if booking is not None:
+            booking.start_utc = start_utc
+            booking.end_utc = end_utc
+
+    async def cancel_calendar_booking(self, conversation_id: int) -> None:
+        self.calendar_bookings.pop(conversation_id, None)
+
+    async def create_pending_booking(
+        self,
+        conversation_id: int,
+        crm_conversation_id: str,
+        service_key: str,
+        start_utc: datetime,
+        end_utc: datetime,
+        label: str,
+        direccion: str,
+        dia_confirmado: str,
+        next_reminder_at: datetime,
+        costo_cotizado: float = 0.0,
+        telefono_cliente: str = "",
+        kind: str = "nueva",
+        google_event_id: str | None = None,
+    ) -> PendingBooking:
+        pid = next(self._ids)
+        pending = PendingBooking(
+            id=pid,
+            conversation_id=conversation_id,
+            crm_conversation_id=crm_conversation_id,
+            service_key=service_key,
+            start_utc=start_utc,
+            end_utc=end_utc,
+            label=label,
+            direccion=direccion,
+            dia_confirmado=dia_confirmado,
+            next_reminder_at=next_reminder_at,
+            costo_cotizado=costo_cotizado,
+            telefono_cliente=telefono_cliente,
+            kind=kind,
+            google_event_id=google_event_id,
+        )
+        self.pending_bookings[pid] = pending
+        return pending
+
+    async def get_pending_booking(self, pending_id: int) -> PendingBooking | None:
+        return self.pending_bookings.get(pending_id)
+
+    async def list_pending_bookings_pendientes(self) -> list[PendingBooking]:
+        return sorted(
+            (p for p in self.pending_bookings.values() if p.estado == "pendiente"),
+            key=lambda p: p.id,
+        )
+
+    async def list_pending_bookings_for_conversation(
+        self, conversation_id: int
+    ) -> list[PendingBooking]:
+        return sorted(
+            (p for p in self.pending_bookings.values() if p.conversation_id == conversation_id),
+            key=lambda p: p.id,
+        )
+
+    async def due_booking_reminders(self, now: datetime) -> list[PendingBooking]:
+        return [
+            p for p in sorted(self.pending_bookings.values(), key=lambda p: p.id)
+            if p.estado == "pendiente" and p.next_reminder_at <= now
+        ]
+
+    async def mark_booking_reminder_sent(
+        self, pending_id: int, next_reminder_at: datetime
+    ) -> None:
+        pending = self.pending_bookings.get(pending_id)
+        if pending is not None:
+            pending.reminders_sent += 1
+            pending.next_reminder_at = next_reminder_at
+
+    async def mark_pending_avisado(self, pending_id: int) -> None:
+        pending = self.pending_bookings.get(pending_id)
+        if pending is not None:
+            pending.avisado_al_dueno = True
+
+    async def resolve_pending_booking(self, pending_id: int, estado: str) -> None:
+        pending = self.pending_bookings.get(pending_id)
+        if pending is not None:
+            pending.estado = estado
+            pending.resolved_at = utcnow()
+
     async def enqueue_pending_send(
         self,
         conversation_id: int,
@@ -505,6 +720,8 @@ class AppContext:
     # el contexto del turno; None fuera del modo multi-organización.
     organizacion: tuple[str, str] | None = None
     coalescer: Any | None = None
+    # Agenda propia (Google Calendar) o None si no está configurada.
+    calendar: Any = None  # GoogleCalendarClient / NullCalendarClient (app/gcal.py)
     relay_wake: asyncio.Event = field(default_factory=asyncio.Event)
     dispatch_wake: asyncio.Event = field(default_factory=asyncio.Event)
     # ¿El CRM de esta instancia tiene motor de agenda? Vocero lo trae detrás de
