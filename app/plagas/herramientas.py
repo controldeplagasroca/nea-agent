@@ -751,6 +751,14 @@ class RuntimeDePlagas(ToolRuntime):
 
     # ---------------------------------------------------------- cotización ---
 
+    def _plaga_que_dijo_el_lead(self) -> str | None:
+        """La última plaga que el lead nombró en la conversación, o None."""
+        for mensaje in reversed(self._mensajes_lead):
+            clave = _ultima_plaga_nombrada(mensaje)
+            if clave is not None:
+                return clave
+        return None
+
     async def _cotizar(self, args: dict[str, Any]) -> dict[str, Any]:
         caso = self.caso
         if caso.recurrente:
@@ -777,6 +785,29 @@ class RuntimeDePlagas(ToolRuntime):
                     "Todavía no está confirmada la plaga: sigue con identificar_plaga. "
                     "Dile que el precio depende de qué plaga sea y hazle la pregunta "
                     "de identificación que falta. No digas ninguna cifra."
+                ),
+            }
+        nombrada = self._plaga_que_dijo_el_lead()
+        if nombrada is not None and not _misma_familia(nombrada, caso.plaga):
+            # Lo confirmado es de otra conversación o de antes: el lead ahora
+            # habla de otra plaga. Cotizar lo viejo le daría el precio de una
+            # plaga que no tiene (caso real: «chinches» cotizadas como cucaracha
+            # alemana). Se suelta lo anterior y se vuelve a identificar.
+            logger.warning(
+                "plagas: el lead habla de %s pero lo confirmado es %s — no se cotiza",
+                nombrada, caso.plaga,
+            )
+            caso.plaga = None
+            caso.turno_plaga = 0
+            caso.cotizacion = None
+            caso.aceptada = False
+            return {
+                "ok": False,
+                "error": "plaga_distinta_a_la_confirmada",
+                "instrucciones": (
+                    f"El lead habla de {nombrada.replace('_', ' ')}, no de la plaga que "
+                    "estaba confirmada antes. No digas ninguna cifra. Llama "
+                    f"identificar_plaga con plaga={nombrada!r} y sigue el PASO ACTUAL."
                 ),
             }
         if caso.turno_plaga == caso.turno:
@@ -1303,6 +1334,21 @@ def _alias(texto: str) -> str | None:
     plano = normalizar(texto)
     # El catálogo de alias va de lo específico a lo general: gana el primero.
     return next((clave for patron, clave in catalogo.ALIAS if re.search(patron, plano)), None)
+
+
+def _ultima_plaga_nombrada(texto: str) -> str | None:
+    """La plaga que un texto nombra AL FINAL («no son cucarachas, son chinches»).
+
+    `_alias` devuelve la primera del catálogo que aparezca; aquí manda la que se
+    dijo último, que es la que el cliente quiere decir.
+    """
+    plano = normalizar(texto)
+    hallazgos = [
+        (m.start(), clave)
+        for patron, clave in catalogo.ALIAS
+        for m in re.finditer(patron, plano)
+    ]
+    return max(hallazgos)[1] if hallazgos else None
 
 
 def _misma_familia(a: str, b: str) -> bool:
