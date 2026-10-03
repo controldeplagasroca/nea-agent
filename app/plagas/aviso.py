@@ -22,6 +22,7 @@ Es best-effort: un aviso que no sale jamás afecta el turno del lead.
 from __future__ import annotations
 
 import logging
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from app.config import canonical_identity
@@ -88,6 +89,14 @@ async def avisar_al_dueno(
         return False
     nombre = str(((context or {}).get("contact") or {}).get("name") or "")
     texto = texto_del_aviso(caso, motivo, nombre, canonical_identity(identidad_lead))
+    if await _enviar_al_dueno(ctx, destino, texto):
+        logger.info("aviso al dueño enviado (motivo=%s)", motivo)
+        return True
+    return False
+
+
+async def _enviar_al_dueno(ctx: Any, destino: str, texto: str) -> bool:
+    """Escribe `texto` en la conversación del dueño. Best-effort: nunca lanza."""
     try:
         del_dueno = await ctx.crm.get_context(destino)
         info = (del_dueno or {}).get("conversation") or {}
@@ -113,5 +122,40 @@ async def avisar_al_dueno(
     except Exception as exc:  # best-effort: el turno del lead ya terminó bien
         logger.warning("aviso al dueño: no salió (%s)", exc)
         return False
-    logger.info("aviso al dueño enviado (motivo=%s)", motivo)
+    return True
+
+
+# Cada cuánto, como mucho, se le repite al dueño que Nea sigue callada con el
+# MISMO cliente (si el cliente escribe cinco veces, un solo aviso).
+PARO_REPETIR_MINUTOS = 30
+
+
+async def avisar_paro(
+    ctx: Any, *, identidad_lead: str, nombre: str = "", que_paso: str, ultimo_mensaje: str = ""
+) -> bool:
+    """Le avisa al dueño que Nea NO está atendiendo a un cliente.
+
+    Distinto de `avisar_al_dueno`: aquello es un pase a propósito (visita,
+    cotización a mano). Esto es cuando Nea se detiene sin que nadie lo decida:
+    el modelo falló, el turno reventó, o la IA quedó apagada y el cliente sigue
+    escribiendo. Sin este aviso el cliente espera en silencio y nadie se entera.
+    """
+    destino = ctx.settings.aviso_dueno_identity or ctx.settings.owner_identity
+    cliente = canonical_identity(identidad_lead)
+    if not destino or cliente == destino:
+        return False
+    ahora = datetime.now(timezone.utc)
+    previos = ctx.paros_avisados
+    ultimo = previos.get(cliente)
+    if ultimo is not None and ahora - ultimo < timedelta(minutes=PARO_REPETIR_MINUTOS):
+        return False
+    quien = " · ".join(p for p in (nombre.strip(), cliente if cliente.isdigit() else "") if p) or "un cliente"
+    lineas = ["⚠️ *Nea se detuvo con un cliente*", f"👤 {quien}", f"❓ {que_paso}"]
+    if ultimo_mensaje.strip():
+        lineas.append(f"💬 Último mensaje: «{' '.join(ultimo_mensaje.split())[:160]}»")
+    lineas.append("Contéstale tú desde la bandeja de Vocero: mientras la IA siga apagada, Nea no escribe.")
+    if not await _enviar_al_dueno(ctx, destino, "\n".join(lineas)):
+        return False
+    previos[cliente] = ahora
+    logger.info("aviso de paro al dueño enviado (%s)", que_paso)
     return True

@@ -724,6 +724,9 @@ class AppContext:
     # el contexto del turno; None fuera del modo multi-organización.
     organizacion: tuple[str, str] | None = None
     coalescer: Any | None = None
+    # identidad del cliente -> cuándo se le avisó al dueño que Nea se detuvo con él
+    # (para no repetir el aviso en cada mensaje). En memoria: si Nea reinicia, vuelve a avisar.
+    paros_avisados: dict[str, datetime] = field(default_factory=dict)
     # Agenda propia (Google Calendar) o None si no está configurada.
     calendar: Any = None  # GoogleCalendarClient / NullCalendarClient (app/gcal.py)
     relay_wake: asyncio.Event = field(default_factory=asyncio.Event)

@@ -41,7 +41,9 @@ async def test_llm_agotado_silencio_mas_handoff_error(ctx, client, respx_mock):
     assert resp.status_code == 200  # el webhook JAMÁS falla por el LLM
     await asyncio.sleep(0.25)
 
-    assert routes["messages"].call_count == 0  # nada roto al lead
+    # Ya no se queda muda: el cliente recibe UN aviso fijo (nada del modelo roto)
+    assert routes["messages"].call_count == 1
+    assert "problema para responderte" in routes["messages"].calls[0].request.content.decode()
     assert routes["handoff"].call_count == 1
     body = json.loads(routes["handoff"].calls[0].request.content)
     assert body["reason"] == "error"
@@ -172,7 +174,7 @@ async def test_una_nota_interna_no_le_llega_al_lead(ctx, client, respx_mock):
     assert textos == ["Tienes razón, disculpa la repetición. ¡Éxito con tus ventas!"]
 
 
-async def test_si_la_segunda_tambien_sale_mal_silencio_y_handoff(ctx, client, respx_mock):
+async def test_si_la_segunda_tambien_sale_mal_aviso_y_handoff(ctx, client, respx_mock):
     routes = mock_crm_basics(respx_mock)
     ctx.llm.replies = [
         LlmReply(content="(nota interna)"),
@@ -181,6 +183,9 @@ async def test_si_la_segunda_tambien_sale_mal_silencio_y_handoff(ctx, client, re
     await client.post("/webhook", content=wa_body(text="hola"))
     await asyncio.sleep(0.25)
 
-    assert routes["messages"].call_count == 0
+    # Ni la nota interna del modelo llega al cliente: solo el aviso fijo.
+    assert routes["messages"].call_count == 1
+    texto = routes["messages"].calls[0].request.content.decode()
+    assert "problema para responderte" in texto and "nota" not in texto
     assert routes["handoff"].call_count == 1
     assert json.loads(routes["handoff"].calls[0].request.content)["reason"] == "error"
