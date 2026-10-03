@@ -500,14 +500,15 @@ class PgStore(PgDispatchStore):
         telefono_cliente: str = "",
         kind: str = "nueva",
         google_event_id: str | None = None,
+        nota: str = "",
     ) -> PendingBooking:
         row = await self.pool.fetchrow(
             """
             INSERT INTO pending_bookings
                 (conversation_id, crm_conversation_id, service_key, start_utc,
                  end_utc, label, direccion, dia_confirmado, next_reminder_at,
-                 costo_cotizado, telefono_cliente, kind, google_event_id)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+                 costo_cotizado, telefono_cliente, kind, google_event_id, nota)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
             RETURNING *
             """,
             conversation_id,
@@ -523,6 +524,7 @@ class PgStore(PgDispatchStore):
             telefono_cliente,
             kind,
             google_event_id,
+            nota,
         )
         assert row is not None
         return _pending_from_row(row)

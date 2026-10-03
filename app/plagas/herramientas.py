@@ -1144,6 +1144,19 @@ class RuntimeDePlagas(ToolRuntime):
             dichas.update(re.findall(r"[a-z0-9ñ]+", normalizar(m)))
         return bool(piezas & dichas)
 
+    def _nota_de_zona(self) -> str:
+        """Aviso para quien aprueba: las zonas de un solo día (Toluca, Lerma) no
+        las cubren todos los técnicos, así que no basta con que el horario esté
+        libre: hay que confirmar que ese día vaya alguien."""
+        c = self.caso.cobertura
+        if c.get("dia_restringido") is None:
+            return ""
+        zona = str(c.get("zona") or "zona restringida")
+        return (
+            f"⚠️ Zona {zona} (solo {c.get('dia_nombre', 'ese día')}): confirma que "
+            "haya un técnico que vaya ese día antes de aprobar."
+        )
+
     async def _registrar_pendiente(self, chosen: OfferedSlot) -> None:
         """Con agenda propia: la solicitud queda con folio y se le pide al dueño
         «sí <folio>» / «no <folio>» (app/approvals.py). Aprobada, se crea el
@@ -1170,6 +1183,7 @@ class RuntimeDePlagas(ToolRuntime):
             next_reminder_at=next_reminder(ctx.settings.booking_reminder_minutes),
             costo_cotizado=float(precio) if isinstance(precio, (int, float)) else 0.0,
             telefono_cliente=self._conv.wa_identity,
+            nota=self._nota_de_zona(),
         )
         if caso.cita is not None:
             caso.cita["folio"] = pending.id
@@ -1215,6 +1229,11 @@ class RuntimeDePlagas(ToolRuntime):
             f"{dueno[0].upper()}{dueno[1:]} te la confirma por aquí en breve; "
             "mientras tanto queda como solicitud.",
         ]
+        if caso.cobertura.get("dia_restringido") is not None:
+            partes.append(
+                f"En tu zona damos servicio los {caso.cobertura.get('dia_nombre')}; "
+                "al confirmarte verificamos que haya técnico disponible ese día."
+            )
         if info.get("contencion"):
             partes.append(f"⚠️ {info['contencion']}")
         self.texto_garantizado = "\n\n".join(partes)

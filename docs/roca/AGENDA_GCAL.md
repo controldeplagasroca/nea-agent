@@ -51,3 +51,16 @@ Nea se comporta como antes de este cambio (usa la agenda del CRM).
   momento cae fuera de horario, ofrece el siguiente horario laboral inmediato.
 - Duración que bloquea cada visita (interna, no se le dice al cliente): cucaracha
   alemana y americana 90 min (60 de aplicación + 30 de traslado).
+
+## Técnicos en paralelo y zonas de un solo día
+
+- **Capacidad:** `BOOKING_MAX_PARALELO` (2 por defecto: 3 técnicos, uno de colchón).
+  Un horario sigue libre mientras coincidan menos visitas de las permitidas.
+  Se cuentan los **eventos** del calendario compartido (no freeBusy, que fusiona
+  los traslapes). Un evento de día completo (feriado, cierre) cierra ese día;
+  los cancelados y los marcados «disponible» no ocupan.
+- **Nea no asigna técnico:** solo sabe cuántas visitas caben a la vez.
+- **Toluca y Lerma (solo miércoles):** como no todos los técnicos van, que el
+  horario esté libre no basta. La solicitud te llega con la nota «⚠️ Zona Toluca
+  (solo miércoles): confirma que haya un técnico que vaya ese día antes de
+  aprobar», y al cliente se le dice que se verifica la disponibilidad.

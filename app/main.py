@@ -145,6 +145,7 @@ def _build_calendar(settings: Settings) -> Any:
             settings.google_calendar_id,
             settings.agent_timezone,
             lead_hours=settings.booking_lead_hours,
+            max_parallel=settings.booking_max_paralelo,
         )
     except Exception:
         logger.exception("agenda: no pude armar el cliente de Google Calendar — sin Google Calendar")
