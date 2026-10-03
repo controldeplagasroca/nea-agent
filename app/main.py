@@ -28,6 +28,7 @@ from app.dispatch_worker import run as run_dispatch_worker
 from app.db import PgStore
 from app.followup import FollowupWorker
 from app.llm import OpenAiLlm
+from app.ops_sync import router as ops_sync_router
 from app.multiorg import (
     CrmSinOrganizacion,
     LlmSinOrganizacion,
@@ -279,6 +280,7 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
         app.include_router(dispatch_router)
     else:
         app.include_router(webhook_router)
+        app.include_router(ops_sync_router)
 
     @app.get("/health")
     async def health(request: Request):  # type: ignore[no-untyped-def]

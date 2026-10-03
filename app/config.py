@@ -185,6 +185,11 @@ class Settings(BaseSettings):
     # bandeja del CRM. Ver app/plagas/aviso.py para lo que necesita.
     aviso_dueno_wa: str = ""
 
+    # Integración ROCA OPS → Nea (POST /roca-ops/sync). Secreto compartido que
+    # OPS manda en el header `X-Vocero-Secret`. Vacío = el endpoint responde
+    # 503 (falla cerrado: escribe datos de clientes).
+    roca_ops_sync_secret: str = ""
+
     # Cada cuántos segundos, como mucho, se le vuelve a preguntar al CRM si
     # agenda (la bandera AGENDA de Vocero). Antes se preguntaba solo al
     # arrancar: encenderla exigía reiniciar Nea. La pregunta la hace el primer
