@@ -206,3 +206,12 @@ async def test_si_no_se_pudo_avisar_al_cliente_el_dueno_se_entera():
 
     assert "No pude avisarle al cliente" in texto
     assert (await ctx.store.get_pending_booking(pend.id)).estado == "aprobado"
+
+
+def test_las_dos_cucarachas_bloquean_90_minutos():
+    """60 min de aplicación + 30 de traslado promedio. Es tiempo interno de
+    agenda: no se le dice al cliente."""
+    from app.gcal import SERVICE_RULES
+
+    assert SERVICE_RULES["alemana"].duration_minutes == 90
+    assert SERVICE_RULES["americana"].duration_minutes == 90

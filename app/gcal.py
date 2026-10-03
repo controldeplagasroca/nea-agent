@@ -53,7 +53,7 @@ class ServiceRule:
 # calendario — se puede afinar más adelante si da problemas).
 SERVICE_RULES: dict[str, ServiceRule] = {
     "alemana": ServiceRule("alemana", "cucaracha alemana", 90),
-    "americana": ServiceRule("americana", "cucaracha americana", 120),
+    "americana": ServiceRule("americana", "cucaracha americana", 90),
     "chinches": ServiceRule("chinches", "chinches de cama", 150),
     "alacran_arana": ServiceRule("alacran_arana", "alacrán/araña", 150),
     # Ventanas agendables por mayor actividad de la hormiga — sustituyen al
