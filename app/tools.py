@@ -26,6 +26,7 @@ from app.crm import (
     SlotTaken,
 )
 from app.gcal import CalendarError
+from app.horarios import validar_hora_contra_slot, zona_agente
 from app.profile import BusinessProfile
 from app.state import AppContext, Conversation, OfferedSlot
 
@@ -641,6 +642,17 @@ class ToolRuntime:
             ),
         }
 
+    async def _texto_reciente_del_lead(self, limite: int = 3) -> str:
+        """Los últimos mensajes del LEAD, para contrastar lo que dijo de verdad.
+
+        No se usa `args["dia_confirmado"]` a propósito: ese campo lo redacta el
+        propio modelo, así que una interpretación equivocada se validaría a sí
+        misma. La fuente de verdad es el mensaje que el cliente escribió.
+        """
+        mensajes = await self._ctx.store.recent_messages(self._conv.id, 12)
+        del_lead = [m.content for m in mensajes if m.role == "user"]
+        return "\n".join(del_lead[-limite:])
+
     async def _resolve_offered(
         self, args: dict[str, Any], accion: str
     ) -> tuple[OfferedSlot | None, dict[str, Any] | None]:
@@ -676,6 +688,29 @@ class ToolRuntime:
                 "detalle": "solo puedes agendar un horario que ya ofreciste",
                 "slots_ofrecidos": _slots_for_llm(offered),
             }
+        # --- Candado de meridiano ------------------------------------------
+        # El epoch es válido (el slot se ofreció), pero eso no basta: hay que
+        # contrastar lo que el LEAD escribió contra la hora LOCAL del slot. El
+        # caso real: se ofreció 09:00/09:30/10:00 de la mañana, el lead dijo
+        # "9:30 pm" y el modelo apartó el de 09:30 AM — un epoch perfectamente
+        # ofrecido, con la hora equivocada. Ver app/horarios.py.
+        ok_hora, error_hora = validar_hora_contra_slot(
+            await self._texto_reciente_del_lead(),
+            chosen.start_utc,
+            zona_agente(getattr(self._ctx.settings, "agent_timezone", None)),
+        )
+        if not ok_hora:
+            logger.info(
+                "tools: %s rechazado por hora del lead — %s",
+                accion,
+                (error_hora or {}).get("error"),
+            )
+            # Se le devuelven los slots para que pueda ofrecer alternativas
+            # reales en el mismo turno en vez de quedar sin salida.
+            error_hora = dict(error_hora or {})
+            error_hora["slots_ofrecidos"] = _slots_for_llm(offered)
+            return None, error_hora
+
         # Deja rastro de sobre qué frase del lead se tomó la decisión: cuando
         # una cita sale mal, esto dice si hubo confirmación o se asumió.
         logger.info(
