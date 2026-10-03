@@ -215,3 +215,38 @@ def test_las_dos_cucarachas_bloquean_90_minutos():
 
     assert SERVICE_RULES["alemana"].duration_minutes == 90
     assert SERVICE_RULES["americana"].duration_minutes == 90
+
+
+async def test_9_30_pm_no_aparta_el_horario_de_las_9_30_am():
+    """El caso real: se ofreció la mañana, el lead dijo «9:30 pm» y el modelo
+    apartó las 09:30 am. El servidor lo detiene y manda a preguntar."""
+    ctx = _ctx()
+    rt = await _runtime(ctx)
+    am = datetime(2026, 8, 5, 15, 30, tzinfo=timezone.utc)  # 09:30 CDMX
+    await ctx.store.replace_offered_slots(
+        rt._conv.id,
+        [OfferedSlot(conversation_id=rt._conv.id, start_utc=am, end_utc=None,
+                     label="el miércoles 5 de agosto, 09:30")],
+    )
+    await ctx.store.add_message(rt._conv.id, "user", "sí, mañana a las 9:30 pm")
+
+    elegido, error = await rt._resolve_offered({"start_utc": "2026-08-05T15:30:00Z"}, "book_session")
+
+    assert elegido is None
+    assert error["error"] == "ambiguo_am_pm"
+    assert "de la mañana o de la noche" in error["mensaje_al_cliente"]
+
+
+async def test_hora_que_si_coincide_se_agenda():
+    ctx = _ctx()
+    rt = await _runtime(ctx)
+    am = datetime(2026, 8, 5, 15, 30, tzinfo=timezone.utc)
+    await ctx.store.replace_offered_slots(
+        rt._conv.id,
+        [OfferedSlot(conversation_id=rt._conv.id, start_utc=am, end_utc=None, label="09:30")],
+    )
+    await ctx.store.add_message(rt._conv.id, "user", "mañana a las 9:30 am")
+
+    elegido, error = await rt._resolve_offered({"start_utc": "2026-08-05T15:30:00Z"}, "book_session")
+
+    assert error is None and elegido is not None

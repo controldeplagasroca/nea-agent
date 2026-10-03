@@ -31,6 +31,7 @@ from app import hostility
 from app.approvals import enviar_solicitud_aprobacion, next_reminder
 from app.crm import CrmError
 from app.gcal import SERVICE_RULES, SERVICIO_DE_PLAGA
+from app.horarios import _coincide, analizar_horas
 from app.plagas import candados, catalogo, cobertura, diagnostico, precios
 from app.plagas.caso import DIRECCION_CAMPOS, DIRECCION_NOMBRES, Caso
 from app.plagas.texto import normalizar
@@ -910,6 +911,57 @@ class RuntimeDePlagas(ToolRuntime):
             d += timedelta(days=1)
         return fechas
 
+    # ---------------------------------------------- horario que propone el lead ---
+
+    async def _propone_su_horario(self, args: dict[str, Any]) -> bool:
+        """¿El lead está PROponiendo su propio día u hora, en vez de elegir uno ofrecido?
+
+        Regla del negocio: si el cliente sugiere un horario, no se agenda ni se
+        le contradice: se manda a verificar con el dueño. Si no sugiere ninguno,
+        Nea ofrece los suyos (24 h de anticipación, dentro de horario laboral).
+
+        Elegir «el de las 10:00» entre lo ya ofrecido NO es sugerir.
+        """
+        texto = self._texto_lead
+        horas = analizar_horas(texto)
+        menciona_dia = bool(_RE_DIA_PROPUESTO.search(normalizar(texto)))
+        if not horas and not menciona_dia:
+            return False
+        ofrecidos = await self._ctx.store.get_offered_slots(self._conv.id)
+        if horas and ofrecidos:
+            tz = _zona_del_negocio(self._ctx)
+            locales = [s.start_utc.astimezone(tz) for s in ofrecidos]
+            if all(any(_coincide(h, local) for local in locales) for h in horas):
+                return False  # eligió una hora de las ofrecidas
+        if not horas and ofrecidos and not args.get("fecha"):
+            return False  # «sí, el jueves» sobre una oferta que ya traía jueves
+        return True
+
+    async def _pasar_horario_al_dueno(self) -> dict[str, Any]:
+        """El lead propuso su horario: se le pasa al dueño con lo que escribió."""
+        caso = self.caso
+        propuesta = re.sub(r"\s+", " ", self._texto_lead).strip()[:160]
+        dueno = catalogo.NEGOCIO["dueno"]
+        caso.escalado = f"El cliente propone su propio horario: «{propuesta}»"
+        await self._ficha({
+            "resultado": "handoff",
+            "notas": f"HORARIO PROPUESTO POR EL CLIENTE, verificar: «{propuesta}»"[:480],
+        })
+        self.handoff_reason = "cliente"
+        self.texto_garantizado = (
+            f"Anoté el horario que me propones ({propuesta}). "
+            f"Se lo paso a {dueno} para verificar que se pueda y te confirma por aquí en breve."
+        )
+        return {
+            "ok": True,
+            "estado": "horario_propuesto_en_verificacion",
+            "instrucciones": (
+                "El lead propuso su propio horario: ya se le pasó al dueño para "
+                "verificarlo y el lead ya recibió el aviso. No ofrezcas otros "
+                "horarios ni confirmes el suyo. No agregues nada."
+            ),
+        }
+
     async def _propose_slots(self, args: dict[str, Any]) -> dict[str, Any]:
         caso = self.caso
         if caso.cotizacion is None:
@@ -928,6 +980,10 @@ class RuntimeDePlagas(ToolRuntime):
                 "instrucciones": "Acabas de darle el precio: espera a que diga que sí quiere agendar.",
             }
         dia = caso.cobertura.get("dia_restringido")
+        # En una zona de un solo día (Toluca, Lerma) el día lo manda la regla de
+        # zona, no el dueño: pedir otro día se contesta abajo con «solo ese día».
+        if dia is None and await self._propone_su_horario(args):
+            return await self._pasar_horario_al_dueno()
         if dia is None:
             res = await super()._propose_slots(args)
         else:
@@ -961,6 +1017,16 @@ class RuntimeDePlagas(ToolRuntime):
         if res.get("ok"):
             caso.aceptada = True
         return res
+
+    async def _resolve_offered(
+        self, args: dict[str, Any], accion: str
+    ) -> tuple[OfferedSlot | None, dict[str, Any] | None]:
+        chosen, error = await super()._resolve_offered(args, accion)
+        if error is not None and error.get("error") == "hora_no_ofrecida":
+            # Pidió una hora que nadie le ofreció: no se le contradice ni se
+            # inventa; el dueño la verifica.
+            return None, await self._pasar_horario_al_dueno()
+        return chosen, error
 
     async def _book_session(self, args: dict[str, Any]) -> dict[str, Any]:
         caso = self.caso
@@ -1157,6 +1223,15 @@ class RuntimeDePlagas(ToolRuntime):
             "estado": "solicitud_registrada",
             "instrucciones": "Ya se le envió al lead la confirmación de su solicitud. No agregues nada.",
         }
+
+# Días que el lead puede PROponer («el sábado», «mañana», «pasado mañana», «el 12»).
+# «mañana» sola es el día; «de la mañana» es la hora del reloj y no cuenta.
+_RE_DIA_PROPUESTO = re.compile(
+    r"\b(?:lunes|martes|miercoles|jueves|viernes|sabado|domingo|hoy|pasado manana)\b"
+    r"|(?<!la )\bmanana\b"
+    r"|\bel\s+\d{1,2}(?:\s+de\s+[a-z]+)?\b"
+    r"|\b\d{1,2}/\d{1,2}\b"
+)
 
 # Cómo dice la gente cada tipo de inmueble.
 _DICE_INMUEBLE: dict[str, tuple[str, ...]] = {

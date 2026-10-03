@@ -37,5 +37,17 @@ Nea se comporta como antes de este cambio (usa la agenda del CRM).
   confirmar** en `app/gcal.py::SERVICE_RULES`.
 - Las reglas de Lerma/Toluca (solo miércoles) siguen aplicándose encima de los
   horarios del calendario.
-- No se portó `horarios.py` (verificación de la hora que escribe el lead contra
-  el horario elegido, p. ej. «9:30 pm» vs 09:30 am).
+- `app/horarios.py`: antes de apartar un horario compara la hora que escribió el
+  lead con la del horario elegido («9:30 pm» vs 09:30 am → pregunta antes).
+
+## Regla del horario
+
+- **Si el cliente propone su día u hora**, no se agenda ni se le contradice: la
+  conversación se pasa al dueño con lo que escribió, para que lo verifique.
+  Elegir una hora de las ya ofrecidas no cuenta como proponer.
+- **Si no propone ninguno**, Nea ofrece los suyos: desde 24 h después del momento
+  en que escribe (`BOOKING_LEAD_HOURS`), dentro del horario laboral (lun-vie
+  9:00-18:00, sáb 9:00-14:00; hormiga solo 9:00-11:30 y 16:00-18:30). Si ese
+  momento cae fuera de horario, ofrece el siguiente horario laboral inmediato.
+- Duración que bloquea cada visita (interna, no se le dice al cliente): cucaracha
+  alemana y americana 90 min (60 de aplicación + 30 de traslado).
