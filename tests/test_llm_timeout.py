@@ -213,7 +213,8 @@ async def test_un_timeout_en_el_turno_termina_en_silencio_y_handoff_error(
             await ctx.crm.aclose()
 
     assert proveedor.conexiones == 1 + OpenAiLlm.RETRIES
-    assert rutas["messages"].call_count == 0  # nada roto al lead
+    # El cliente recibe el aviso fijo (no se queda en silencio) y nada roto del modelo.
+    assert rutas["messages"].call_count == 1
     assert rutas["handoff"].call_count == 1
     assert json.loads(rutas["handoff"].calls[0].request.content)["reason"] == "error"
     conv = await ctx.store.get_or_create_conversation(IDENTITY)

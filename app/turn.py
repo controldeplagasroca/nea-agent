@@ -292,6 +292,10 @@ async def _handoff_de_emergencia(ctx: AppContext, identity: str, turno: _Turno) 
         identity,
         turno.crm_conversation_id,
     )
+    await aviso_de_plagas.avisar_paro(
+        ctx, identidad_lead=identity,
+        que_paso="El turno falló por un error interno de Nea y la IA quedó apagada en esa conversación.",
+    )
 
 
 def _reprogramar(
@@ -559,6 +563,16 @@ async def run_turn(
         return
     if not conversation_info.get("aiEnabled", False):
         logger.info("turno %s: aiEnabled=false (handoff activo) — silencio", identity)
+        # El cliente escribió y nadie le va a contestar: se le avisa al dueño (una
+        # vez cada 30 min por cliente) para que no espere en silencio.
+        if any(trae_contenido(m.type, m.text) for m in inbound):
+            await aviso_de_plagas.avisar_paro(
+                ctx,
+                identidad_lead=identity,
+                nombre=str(((context or {}).get("contact") or {}).get("name") or ""),
+                que_paso="La IA de esta conversación está apagada y el cliente sigue escribiendo sin respuesta.",
+                ultimo_mensaje=" ".join((m.text or "") for m in inbound),
+            )
         return
     if not conversation_info.get("windowOpen", False):
         logger.info("turno %s: ventana de 24 h cerrada — silencio", identity)
@@ -709,16 +723,36 @@ async def run_turn(
             # cualquier herramienta. El texto lo pone el servidor.
             final_text = "…"
         else:
-            final_text = await _tool_loop(ctx, messages, runtime, forzar=obligada)
+            try:
+                final_text = await _tool_loop(ctx, messages, runtime, forzar=obligada)
+            except LlmExhausted as exc:
+                if not image_uris:
+                    raise
+                # Una imagen que el modelo no pudo procesar no debe cortar la
+                # conversación: se reintenta SIN ella, avisando que no se vio.
+                logger.warning(
+                    "turno %s: el modelo falló con una imagen (%s) — reintento sin ella",
+                    identity, exc,
+                )
+                messages[-1]["content"] = (
+                    f"{user_text}\n\n[El cliente envió una imagen que no pude ver. "
+                    "Dile que no la pudiste ver y pídele que te describa lo que "
+                    "quería mostrar, sin dejar de seguir el PASO ACTUAL.]"
+                )
+                final_text = await _tool_loop(ctx, messages, runtime, forzar=obligada)
             if isinstance(runtime, RuntimeDePlagas):
                 await plagas.cumplir_obligada(runtime, obligada)
     except LlmExhausted as exc:
         logger.error(
-            "turno %s: LLM agotó reintentos (%s) — silencio + handoff error",
+            "turno %s: LLM agotó reintentos (%s) — aviso al cliente + handoff error",
             identity,
             exc,
         )
-        await _safe_handoff(ctx, str(crm_conv_id), "error", turno)
+        await _detenerse_avisando(
+            ctx, identity=identity, conv=conv, crm_conv_id=str(crm_conv_id), turno=turno,
+            que_paso="El modelo de IA no respondió tras varios intentos.",
+            user_text=user_text, context=context,
+        )
         await ctx.store.update_conversation(
             conv.id, phase="cerrada", followup_due_at=None, **_caso_a_guardar(caso)
         )
@@ -751,8 +785,12 @@ async def run_turn(
         except LlmExhausted:
             final_text = None
         if final_text is None or _respuesta_invalida(final_text, previos):
-            logger.error("turno %s: la segunda respuesta tampoco sirve — silencio + handoff error", identity)
-            await _safe_handoff(ctx, str(crm_conv_id), "error", turno)
+            logger.error("turno %s: la segunda respuesta tampoco sirve — aviso + handoff error", identity)
+            await _detenerse_avisando(
+                ctx, identity=identity, conv=conv, crm_conv_id=str(crm_conv_id), turno=turno,
+                que_paso=f"La respuesta del modelo no sirvió dos veces ({motivo}).",
+                user_text=user_text, context=context,
+            )
             await ctx.store.update_conversation(
                 conv.id, phase="cerrada", followup_due_at=None, **_caso_a_guardar(caso)
             )
@@ -1176,6 +1214,51 @@ async def _send(ctx: AppContext, conv_id: int, crm_conv_id: str, text: str) -> b
         pending_id,
     )
     return False
+
+
+MENSAJE_PARO = (
+    "Tuve un problema para responderte en este momento 🙏 Ya avisé al equipo "
+    "para que te escriba en breve."
+)
+
+
+async def _detenerse_avisando(
+    ctx: AppContext,
+    *,
+    identity: str,
+    conv: Any,
+    crm_conv_id: str,
+    turno: _Turno | None,
+    que_paso: str,
+    user_text: str,
+    context: dict[str, Any] | None,
+) -> None:
+    """Nea no puede seguir con este cliente: ni se queda muda, ni se va sin avisar.
+
+    1. Al cliente se le dice que hubo un problema y que el equipo le escribe
+       (ANTES del handoff: pausada la IA, el CRM ya no deja escribir al bot).
+    2. La conversación pasa al equipo con motivo «error».
+    3. El dueño recibe el aviso en su WhatsApp con lo que pasó y lo último que
+       escribió el cliente.
+    """
+    if await _send(ctx, conv.id, crm_conv_id, MENSAJE_PARO):
+        await ctx.store.add_message(conv.id, "assistant", MENSAJE_PARO)
+    await _safe_handoff(ctx, crm_conv_id, "error", turno)
+    await avisar_paro_seguro(
+        ctx, identity=identity, context=context, que_paso=que_paso, user_text=user_text
+    )
+
+
+async def avisar_paro_seguro(
+    ctx: AppContext, *, identity: str, context: dict[str, Any] | None, que_paso: str, user_text: str
+) -> None:
+    await aviso_de_plagas.avisar_paro(
+        ctx,
+        identidad_lead=identity,
+        nombre=str(((context or {}).get("contact") or {}).get("name") or ""),
+        que_paso=que_paso,
+        ultimo_mensaje=user_text,
+    )
 
 
 async def _safe_handoff(

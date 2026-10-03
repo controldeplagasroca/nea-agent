@@ -64,3 +64,18 @@ Nea se comporta como antes de este cambio (usa la agenda del CRM).
   horario esté libre no basta. La solicitud te llega con la nota «⚠️ Zona Toluca
   (solo miércoles): confirma que haya un técnico que vaya ese día antes de
   aprobar», y al cliente se le dice que se verifica la disponibilidad.
+
+## Continuidad y avisos cuando Nea se detiene
+
+Nea ya no se calla sin que nadie se entere:
+
+| Qué pasa | Qué recibe el cliente | Qué recibes tú |
+|---|---|---|
+| El modelo de IA falla tras reintentos, o su respuesta no sirve dos veces | «Tuve un problema para responderte… ya avisé al equipo» | ⚠️ *Nea se detuvo con un cliente* + qué pasó + su último mensaje |
+| El turno revienta por un error interno | (la red de seguridad apaga la IA) | ⚠️ el mismo aviso |
+| La IA de esa conversación está apagada y el cliente sigue escribiendo | nada (Nea respeta el interruptor) | ⚠️ aviso, **una vez cada 30 min por cliente** |
+| El cliente manda una imagen que el modelo no puede ver | «No pude ver tu foto, ¿me describes…?» (se reintenta sin la imagen) | nada: la conversación sigue |
+
+El aviso sale a `AVISO_DUENO_WA` (o `OWNER_WA_ID`). Sigue la regla de WhatsApp de
+las 24 h: si no le has escrito al número del negocio en el último día, el aviso
+no sale y solo queda la bandeja de Vocero. Un «hola» cada mañana lo mantiene abierto.
