@@ -64,6 +64,24 @@ SERVICE_RULES: dict[str, ServiceRule] = {
     ),
     "pulgas": ServiceRule("pulgas", "pulgas", 100),
     "roedores": ServiceRule("roedores", "roedores", 120),
+    # La tijerilla no estaba en las reglas confirmadas por el dueño: se bloquea
+    # como la alemana (90 min) hasta que diga otra cosa.
+    "tijerilla": ServiceRule("tijerilla", "tijerilla", 90),
+}
+
+# Clave del catálogo de plagas (app/plagas/catalogo.py) -> clave de SERVICE_RULES.
+# Lo que no está aquí (termitas, moscas y mosquitos…) no se agenda solo: es
+# «bajo consulta» y va siempre al dueño.
+SERVICIO_DE_PLAGA: dict[str, str] = {
+    "cucaracha_alemana": "alemana",
+    "cucaracha_americana": "americana",
+    "hormiga": "hormiga",
+    "roedores": "roedores",
+    "alacran": "alacran_arana",
+    "arana": "alacran_arana",
+    "tijerilla": "tijerilla",
+    "chinches": "chinches",
+    "pulgas": "pulgas",
 }
 
 # Horario general del negocio (lunes=0 … sábado=5). Domingo (6) ausente = cerrado.
@@ -135,6 +153,9 @@ class NullCalendarClient:
     """
 
     async def get_availability(self, *args: Any, **kwargs: Any) -> list[dict[str, Any]]:
+        raise CalendarError("agenda no configurada (falta GOOGLE_SERVICE_ACCOUNT_JSON/GOOGLE_CALENDAR_ID)")
+
+    async def get_day(self, *args: Any, **kwargs: Any) -> tuple[list[dict[str, Any]], str]:
         raise CalendarError("agenda no configurada (falta GOOGLE_SERVICE_ACCOUNT_JSON/GOOGLE_CALENDAR_ID)")
 
     async def create_booking(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
@@ -278,6 +299,56 @@ class GoogleCalendarClient:
         for day in sorted(d for d, slots in by_day.items() if slots)[:days]:
             out.extend(by_day[day])
         return out[:limit]
+
+    async def get_day(
+        self, service_key: str, day: date
+    ) -> tuple[list[dict[str, Any]], str]:
+        """TODAS las horas libres de un día, y su estado.
+
+        Estado: `available` (hay horas), `closed` (el negocio no abre ese día o
+        el servicio no tiene ventana), `full` (abre pero no queda nada con el
+        aviso mínimo) o `past` (ya pasó).
+        """
+        rule = SERVICE_RULES.get(service_key)
+        if rule is None:
+            raise CalendarError(f"servicio sin regla de agenda: {service_key!r}")
+        now_local = self._now()
+        if day < now_local.date():
+            return [], "past"
+        ventanas = _windows_for(rule, day.weekday())
+        if not ventanas:
+            return [], "closed"
+        earliest = now_local + self._lead
+        step = timedelta(minutes=SLOT_GRID_MINUTES)
+        duration = timedelta(minutes=rule.duration_minutes)
+        starts: list[datetime] = []
+        for win_start, win_end in ventanas:
+            cursor = datetime.combine(day, win_start, tzinfo=self._tz)
+            close = datetime.combine(day, win_end, tzinfo=self._tz)
+            while cursor + duration <= close:
+                if cursor >= earliest:
+                    starts.append(cursor)
+                cursor += step
+        if not starts:
+            return [], "full"
+        busy = await self._busy_intervals(starts[0], starts[-1] + duration)
+        today = now_local.date()
+        out: list[dict[str, Any]] = []
+        for start in starts:
+            end = start + duration
+            if any(_overlaps(start, end, b_s, b_e) for b_s, b_e in busy):
+                continue
+            hhmm = start.strftime("%H:%M")
+            out.append(
+                {
+                    "startUtc": start.astimezone(timezone.utc).isoformat().replace("+00:00", "Z"),
+                    "endUtc": end.astimezone(timezone.utc).isoformat().replace("+00:00", "Z"),
+                    "dayLabel": _day_label_es(day, today),
+                    "time": hhmm,
+                    "label": _short_label_es(day, hhmm),
+                }
+            )
+        return out, ("available" if out else "full")
 
     # -------------------------------------------------------------- booking ---
 

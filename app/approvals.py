@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+from contextvars import ContextVar
 from datetime import datetime, timedelta
 from typing import Literal
 
@@ -207,11 +208,23 @@ async def enviar_solicitud_aprobacion(ctx: AppContext, pending: PendingBooking) 
         return False
 
 
+# Cuántos avisos al lead fallaron dentro de la resolución en curso. Tras pasarle
+# la conversación al dueño la IA queda en pausa y el CRM puede negarse a que el
+# bot escriba: el dueño tiene que enterarse para avisarle él.
+_avisos_fallidos: ContextVar[int] = ContextVar("avisos_fallidos", default=0)
+
+NOTA_LEAD_SIN_AVISO = (
+    "\n⚠️ No pude avisarle al cliente (la IA de esa conversación puede estar "
+    "en pausa). Escríbele tú desde la bandeja."
+)
+
+
 async def _notificar_lead(ctx: AppContext, pending: PendingBooking, texto: str) -> None:
     try:
         await ctx.crm.send_message(pending.crm_conversation_id, texto)
         await ctx.store.add_message(pending.conversation_id, "assistant", texto)
     except CrmError as exc:
+        _avisos_fallidos.set(_avisos_fallidos.get() + 1)
         logger.warning(
             "approvals: no pude avisarle al lead de la cita #%s: %s", pending.id, exc
         )
@@ -279,7 +292,7 @@ async def _resolver_reagendo(ctx: AppContext, pending: PendingBooking) -> str:
     return f"Listo, reagendo #{pending.id} confirmado y avisado al cliente ✅"
 
 
-async def resolver_aprobacion(ctx: AppContext, pending: PendingBooking, aprobado: bool) -> str:
+async def _resolver(ctx: AppContext, pending: PendingBooking, aprobado: bool) -> str:
     """Ejecuta la aprobación/rechazo, avisa al lead, y regresa el texto de
     confirmación breve para el dueño."""
     if not aprobado:
@@ -351,6 +364,16 @@ async def resolver_aprobacion(ctx: AppContext, pending: PendingBooking, aprobado
     return f"Listo, cita #{pending.id} confirmada y avisado al cliente ✅"
 
 
+async def resolver_aprobacion(ctx: AppContext, pending: PendingBooking, aprobado: bool) -> str:
+    """Ejecuta la aprobación/rechazo, avisa al lead y regresa el texto breve
+    para el dueño (con una nota si el aviso al cliente no salió)."""
+    _avisos_fallidos.set(0)
+    texto = await _resolver(ctx, pending, aprobado)
+    if _avisos_fallidos.get():
+        texto += NOTA_LEAD_SIN_AVISO
+    return texto
+
+
 async def _texto_rechazo_con_alternativas(ctx: AppContext, pending: PendingBooking) -> str:
     """Rechazo del dueño con horarios REALES de la agenda como alternativa.
 
@@ -394,3 +417,43 @@ async def _texto_rechazo_con_alternativas(ctx: AppContext, pending: PendingBooki
 
 def next_reminder(minutes: float) -> datetime:
     return utcnow() + timedelta(minutes=minutes)
+
+
+async def atender_respuesta_del_dueno(ctx: AppContext, identity: str, inbound: list) -> bool:
+    """Gate del turno: ¿este mensaje del dueño aprueba o rechaza una visita?
+
+    True = el mensaje se atendió (se contestó al dueño) y el turno termina ahí;
+    nunca debe llegar al modelo como si fuera un lead. False = no era una
+    respuesta de aprobación: sigue el flujo normal.
+    """
+    pendientes = await ctx.store.list_pending_bookings_pendientes()
+    if not pendientes:
+        return False
+    texto = " ".join((m.text or "") for m in inbound).strip()
+    kind, pending, aprueba = parece_aprobacion(texto, pendientes)
+    respuesta: str | None = None
+    if kind == "resuelto" and pending is not None and aprueba is not None:
+        respuesta = await resolver_aprobacion(ctx, pending, aprueba)
+    elif kind == "formato_invalido":
+        # Una pregunta, un comentario: NO aprueba ni rechaza. La visita sigue
+        # pendiente y se le explica el formato.
+        logger.info(
+            "gate aprobación: mensaje del dueño sin formato válido — "
+            "las citas siguen pendientes (%r)",
+            texto[:80],
+        )
+        respuesta = formato_invalido_para_dueno(pendientes)
+    elif kind == "ambiguo":
+        respuesta = listar_pendientes_para_dueno(pendientes)
+    if respuesta is None:
+        return False
+    try:
+        contexto = await ctx.crm.get_context(identity)
+        conv_id = ((contexto or {}).get("conversation") or {}).get("id")
+        if conv_id:
+            await ctx.crm.send_message(str(conv_id), respuesta)
+        else:
+            logger.warning("gate aprobación: sin conversationId del dueño para responder")
+    except CrmError as exc:
+        logger.warning("gate aprobación: no pude responderle al dueño: %s", exc)
+    return True

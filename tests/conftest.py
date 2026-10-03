@@ -90,6 +90,11 @@ class FakeCalendar:
         self.reschedule_result: dict[str, Any] | Exception = {}
         self.cancel_exc: Exception | None = None
 
+    async def get_day(self, service_key: str, day: Any) -> tuple[list[dict[str, Any]], str]:
+        self.availability_calls.append({"service_key": service_key, "day": str(day)})
+        slots = self.availability_queue.pop(0) if self.availability_queue else []
+        return slots, ("available" if slots else "full")
+
     async def get_availability(
         self, service_key: str, limit: int = 12, per_day: int = 3, days: int = 5,
     ) -> list[dict[str, Any]]:
