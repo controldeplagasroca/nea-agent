@@ -110,11 +110,13 @@ def formatear_solicitud(pending: PendingBooking) -> str:
             f"Nueva fecha: {pending.label}\n\n"
             f'Responde "sí {pending.id}" o "no {pending.id}" para confirmar o rechazar.'
         )
+    nota = f"{pending.nota}\n" if pending.nota else ""
     return (
         f"🐜 Cita #{pending.id} por aprobar\n"
         f"Plaga: {plaga}\n"
         f"Fecha: {pending.label}\n"
-        f"Dirección: {pending.direccion}\n\n"
+        f"Dirección: {pending.direccion}\n"
+        f"{nota}\n"
         f'Responde "sí {pending.id}" o "no {pending.id}" para confirmar o rechazar.'
     )
 

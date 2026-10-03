@@ -1,5 +1,5 @@
 """GoogleCalendarClient: horario/duración por servicio, aviso mínimo, filtro
-de ocupados vía freeBusy, y booking/reschedule contra la API real (mockeada).
+de ocupados vía events.list, y booking/reschedule contra la API real (mockeada).
 
 La cuenta de servicio se firma con una llave RSA DESCARTABLE generada en la
 propia prueba (nunca se usa para autenticar contra Google de verdad) — y
@@ -69,9 +69,20 @@ def calendar(sa_info: dict[str, str]) -> GoogleCalendarClient:
     return client
 
 
+def _eventos(busy: list[dict[str, str]] | None) -> dict[str, Any]:
+    """Respuesta de events.list con un evento por cada intervalo ocupado."""
+    return {
+        "items": [
+            {"status": "confirmed", "start": {"dateTime": b["start"]}, "end": {"dateTime": b["end"]}}
+            for b in (busy or [])
+        ]
+    }
+
+
 def mock_freebusy(respx_mock: Any, busy: list[dict[str, str]] | None = None) -> Any:
-    return respx_mock.post(f"{API_BASE}/freeBusy").mock(
-        return_value=httpx.Response(200, json={"calendars": {CAL_ID: {"busy": busy or []}}})
+    """(Nombre histórico.) Ahora lo ocupado se lee de los eventos del calendario."""
+    return respx_mock.get(f"{API_BASE}/calendars/{CAL_ID}/events").mock(
+        return_value=httpx.Response(200, json=_eventos(busy))
     )
 
 
@@ -153,21 +164,13 @@ async def test_create_booking_conflicto_dispara_alternativas_frescas(calendar, r
     end = start + timedelta(minutes=90)
     ocupado = httpx.Response(
         200,
-        json={
-            "calendars": {
-                CAL_ID: {
-                    "busy": [
-                        {
-                            "start": start.astimezone(timezone.utc).isoformat().replace("+00:00", "Z"),
-                            "end": end.astimezone(timezone.utc).isoformat().replace("+00:00", "Z"),
-                        }
-                    ]
-                }
-            }
-        },
+        json=_eventos([{
+            "start": start.astimezone(timezone.utc).isoformat().replace("+00:00", "Z"),
+            "end": end.astimezone(timezone.utc).isoformat().replace("+00:00", "Z"),
+        }]),
     )
-    libre = httpx.Response(200, json={"calendars": {CAL_ID: {"busy": []}}})
-    respx_mock.post(f"{API_BASE}/freeBusy").mock(side_effect=[ocupado, libre])
+    libre = httpx.Response(200, json=_eventos([]))
+    respx_mock.get(f"{API_BASE}/calendars/{CAL_ID}/events").mock(side_effect=[ocupado, libre])
     with pytest.raises(CalendarSlotTaken) as exc_info:
         await calendar.create_booking(start, end, "resumen", "desc", "alemana")
     assert exc_info.value.slots  # trae alternativas frescas de una segunda consulta

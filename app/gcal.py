@@ -183,12 +183,16 @@ class GoogleCalendarClient:
         calendar_id: str,
         timezone_name: str = "America/Mexico_City",
         lead_hours: float = 24.0,
+        max_parallel: int = 1,
         client: httpx.AsyncClient | None = None,
         now_fn: Callable[[], datetime] | None = None,
     ) -> None:
         self._calendar_id = calendar_id
         self._tz = ZoneInfo(timezone_name)
         self._lead = timedelta(hours=lead_hours)
+        # Cuántas visitas pueden coincidir en el MISMO horario (técnicos en
+        # paralelo). Con 1, un solo evento ocupa el hueco, como antes.
+        self._max_parallel = max(1, int(max_parallel))
         self._creds = service_account.Credentials.from_service_account_info(
             service_account_info, scopes=_SCOPES
         )
@@ -209,34 +213,77 @@ class GoogleCalendarClient:
         except httpx.HTTPError as exc:
             raise CalendarError(f"error de red hacia Google Calendar: {exc}") from exc
 
-    # ------------------------------------------------------------ freebusy ---
+    # --------------------------------------------------------------- ocupado ---
+    #
+    # Se leen los EVENTOS (no freeBusy): freeBusy fusiona los bloques que se
+    # traslapan y entonces no se puede saber cuántas visitas coinciden, que es
+    # justo lo que importa con varios técnicos.
 
     async def _busy_intervals(
         self, time_min: datetime, time_max: datetime
     ) -> list[tuple[datetime, datetime]]:
-        resp = await self._request(
-            "POST",
-            "/freeBusy",
-            json={
+        """Un intervalo por evento. Un evento de día completo (feriado, cierre)
+        ocupa TODA la capacidad ese día."""
+        out: list[tuple[datetime, datetime]] = []
+        page_token: str | None = None
+        while True:
+            params: dict[str, Any] = {
                 "timeMin": time_min.astimezone(timezone.utc).isoformat(),
                 "timeMax": time_max.astimezone(timezone.utc).isoformat(),
-                "items": [{"id": self._calendar_id}],
-            },
+                "singleEvents": "true",
+                "maxResults": 2500,
+            }
+            if page_token:
+                params["pageToken"] = page_token
+            resp = await self._request(
+                "GET", f"/calendars/{self._calendar_id}/events", params=params
+            )
+            if resp.status_code != 200:
+                raise CalendarError(f"events.list devolvió {resp.status_code}")
+            data = resp.json()
+            for ev in data.get("items") or []:
+                if ev.get("status") == "cancelled" or ev.get("transparency") == "transparent":
+                    continue  # cancelado, o marcado «disponible»: no ocupa
+                ini, fin = ev.get("start") or {}, ev.get("end") or {}
+                if ini.get("dateTime") and fin.get("dateTime"):
+                    out.append((
+                        datetime.fromisoformat(str(ini["dateTime"]).replace("Z", "+00:00")),
+                        datetime.fromisoformat(str(fin["dateTime"]).replace("Z", "+00:00")),
+                    ))
+                elif ini.get("date") and fin.get("date"):
+                    dia_ini = datetime.combine(date.fromisoformat(ini["date"]), time(0, 0), tzinfo=self._tz)
+                    dia_fin = datetime.combine(date.fromisoformat(fin["date"]), time(0, 0), tzinfo=self._tz)
+                    out.extend([(dia_ini, dia_fin)] * self._max_parallel)
+            page_token = data.get("nextPageToken")
+            if not page_token:
+                return out
+
+    def _sin_cupo(
+        self, start: datetime, end: datetime, busy: list[tuple[datetime, datetime]]
+    ) -> bool:
+        """¿En algún momento de [start, end) ya coinciden `max_parallel` visitas?"""
+        cruzan = [
+            (max(b_s, start), min(b_e, end))
+            for b_s, b_e in busy
+            if _overlaps(start, end, b_s, b_e)
+        ]
+        if len(cruzan) < self._max_parallel:
+            return False
+        # Barrido: el máximo de eventos simultáneos dentro de la ventana. Al
+        # empatar el instante, primero se cierran los que terminan.
+        puntos = sorted(
+            [(a, 1) for a, _ in cruzan] + [(b, -1) for _, b in cruzan],
+            key=lambda p: (p[0], p[1]),
         )
-        if resp.status_code != 200:
-            raise CalendarError(f"freeBusy devolvió {resp.status_code}")
-        data = resp.json()
-        cal = (data.get("calendars") or {}).get(self._calendar_id) or {}
-        out: list[tuple[datetime, datetime]] = []
-        for b in cal.get("busy") or []:
-            start = datetime.fromisoformat(str(b["start"]).replace("Z", "+00:00"))
-            end = datetime.fromisoformat(str(b["end"]).replace("Z", "+00:00"))
-            out.append((start, end))
-        return out
+        activos = maximo = 0
+        for _, delta in puntos:
+            activos += delta
+            maximo = max(maximo, activos)
+        return maximo >= self._max_parallel
 
     async def _slot_busy(self, start: datetime, end: datetime) -> bool:
         busy = await self._busy_intervals(start, end)
-        return any(_overlaps(start, end, b_s, b_e) for b_s, b_e in busy)
+        return self._sin_cupo(start, end, busy)
 
     def _candidate_starts(
         self, rule: ServiceRule, now_local: datetime, horizon_days: int
@@ -283,7 +330,7 @@ class GoogleCalendarClient:
             if len(bucket) >= per_day:
                 continue
             end = start + duration
-            if any(_overlaps(start, end, b_s, b_e) for b_s, b_e in busy):
+            if self._sin_cupo(start, end, busy):
                 continue
             hhmm = start.strftime("%H:%M")
             bucket.append(
@@ -336,7 +383,7 @@ class GoogleCalendarClient:
         out: list[dict[str, Any]] = []
         for start in starts:
             end = start + duration
-            if any(_overlaps(start, end, b_s, b_e) for b_s, b_e in busy):
+            if self._sin_cupo(start, end, busy):
                 continue
             hhmm = start.strftime("%H:%M")
             out.append(

@@ -198,6 +198,9 @@ class Settings(BaseSettings):
     google_service_account_json: str = ""  # JSON completo, en una línea
     google_calendar_id: str = ""  # calendario compartido con esa cuenta de servicio
     booking_lead_hours: float = 24.0  # anticipación mínima para agendar
+    # Visitas que pueden coincidir en el mismo horario (técnicos en paralelo).
+    # ROCA tiene 3 técnicos y deja uno de colchón: 2.
+    booking_max_paralelo: int = Field(default=2, ge=1)
     # WhatsApp del dueño que aprueba las visitas ("sí <folio>" / "no <folio>").
     # Si no se pone, se usa AVISO_DUENO_WA.
     owner_wa_id: str = ""
