@@ -188,7 +188,7 @@ def test_quita_los_parrafos_que_el_lead_ya_recibio():
     "texto, plaga, ajenos",
     [
         # El caso real de la autoprueba: le puso el método de la hormiga.
-        ("Se les ataca con gel y cebo en los puntos donde se esconden.", "cucaracha_alemana", ["gel", "cebo"]),
+        ("Se les ataca con gel y cebo en los puntos donde se esconden.", "cucaracha_alemana", ["gel"]),  # el cebo en polvo SÍ es de la alemana
         ("Polvo fino en nidos, 2 visitas separadas por 15 días.", "cucaracha_alemana", ["15 días"]),
         ("Son 2 visitas con cebo en gel.", "hormiga", ["2 visitas"]),
         ("Es una sola visita con cebo en gel.", "hormiga", []),

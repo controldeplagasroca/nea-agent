@@ -142,6 +142,42 @@ def _validar(
         d.senales[clave] = cita[:160]
 
 
+# Dónde las ve, dicho con sus palabras («de la cocina», «salen de la coladera»). El
+# baño no se detecta aquí: no distingue la especie.
+_LUGARES_CUCARACHA = {
+    "ubicacion_cocina": r"\bcocina\b",
+    "ubicacion_drenaje": (
+        r"\b(coladeras?|drenajes?|alcantarill\w*|registros?|patios?|sotanos?|"
+        r"estacionamientos?|cisternas?)\b"
+    ),
+}
+
+
+def _detectar_lugar_de_cucaracha(mensajes_lead: list[str], d: Diagnostico) -> None:
+    """El lugar que el lead YA dijo, sin depender de que el modelo lo etiquete.
+
+    Caso real (4 oct): «tengo cucaracha de la cocina, de las chiquitas» y el bot
+    siguió preguntando en qué parte las ve. Ya lo había dicho.
+    """
+    for clave, patron in _LUGARES_CUCARACHA.items():
+        if clave in d.senales:
+            continue
+        for mensaje in mensajes_lead:
+            plano = normalizar(mensaje)
+            hallado = next(
+                (
+                    m for m in re.finditer(patron, plano)
+                    if not _NEGADA.search(plano[max(0, m.start() - 26):m.start()])
+                    and not _NEGADA_DESPUES.search(plano[m.end():m.end() + 16])
+                ),
+                None,
+            )
+            if hallado is not None:
+                d.senales[clave] = mensaje.strip()[:160]
+                d.nuevas += 1
+                break
+
+
 def _detectar(
     catalogo_senales: dict[str, dict[str, Any]], mensajes_lead: list[str], d: Diagnostico
 ) -> None:
@@ -267,6 +303,7 @@ def evaluar(
             catalogo.CUCARACHA_SENALES, propuestas, previas, mensajes_lead,
             ultimo_bot, hay_imagen, d, vetadas,
         )
+        _detectar_lugar_de_cucaracha(mensajes_lead, d)
         return _cucaracha(d, preguntadas)
 
     info = catalogo.PLAGAS.get(plaga)
