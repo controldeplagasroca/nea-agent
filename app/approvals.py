@@ -14,11 +14,13 @@ import json
 import logging
 import re
 from contextvars import ContextVar
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Literal
 
 from app.crm import CrmError
-from app.gcal import SERVICE_RULES, CalendarError, CalendarSlotTaken
+from app.gcal import SERVICE_RULES, CalendarError, CalendarSlotTaken, _day_label_es
+from app.horarios import analizar_horas, zona_agente
+from app.plagas.fechas import fecha_pedida
 from app.state import AppContext, PendingBooking, utcnow
 
 logger = logging.getLogger("nea.approvals")
@@ -117,8 +119,87 @@ def formatear_solicitud(pending: PendingBooking) -> str:
         f"Fecha: {pending.label}\n"
         f"Dirección: {pending.direccion}\n"
         f"{nota}\n"
-        f'Responde "sí {pending.id}" o "no {pending.id}" para confirmar o rechazar.'
+        f'Responde "sí {pending.id}" o "no {pending.id}" para confirmar o rechazar.\n'
+        f'¿Otro horario? Escribe "cambiar {pending.id} martes 10 am" y lo agendo y aviso al cliente.'
     )
+
+
+_RE_PROPUESTA = re.compile(
+    r"\b(?:cambi\w*|mover|muev\w*|reagend\w*|mejor|propongo|sugiero|pasala|pasalo|"
+    r"que\s+sea|en\s+vez)\b"
+)
+
+
+def parece_propuesta_de_horario(
+    texto: str, pendientes: list[PendingBooking]
+) -> tuple[PendingBooking | None, str]:
+    """¿El dueño propone OTRO horario para una solicitud? → (pendiente, texto sin folio).
+
+    Hace falta un verbo de cambio («cambiar 8 martes 10 am», «mejor el jueves a las
+    11 para la 8») y que se pueda leer un día y una hora. El folio es opcional solo si
+    hay una única pendiente.
+    """
+    if not pendientes:
+        return None, ""
+    t = _sin_acentos(texto.lower())
+    if not _RE_PROPUESTA.search(t):
+        return None, ""
+    patron = (
+        r"#\s*(\d{1,6})|\bpara\s+(?:la\s+)?(\d{1,6})\b"
+        r"|\b(?:cambiar|mover|reagendar)\s+(?:la\s+)?#?(\d{1,6})\b"
+    )
+    folios = {int(g) for m in re.finditer(patron, t) for g in m.groups() if g}
+    pending = next((p for p in pendientes if p.id in folios), None)
+    if pending is None and len(pendientes) == 1 and not folios:
+        pending = pendientes[0]
+    if pending is None:
+        return None, ""
+    resto = re.sub(r"#?\b" + str(pending.id) + r"\b", " ", t, count=1)
+    return pending, resto
+
+
+def _hora_24(hora: int, minuto: int, meridiem: str | None) -> tuple[int, int]:
+    if meridiem == "pm" and hora < 12:
+        hora += 12
+    elif meridiem == "am" and hora == 12:
+        hora = 0
+    elif meridiem is None:
+        # Sin am/pm el dueño habla de horario de visitas: 7-11 mañana, 12 mediodía, 1-6 tarde.
+        if 1 <= hora <= 6:
+            hora += 12
+    return hora, minuto
+
+
+async def proponer_horario(ctx: AppContext, pending: PendingBooking, resto: str) -> str:
+    """El dueño sugiere otro día/hora: si hay cupo se agenda y se avisa al cliente."""
+    tz = zona_agente(ctx.settings.agent_timezone)
+    hoy = datetime.now(tz).date()
+    fecha = fecha_pedida(resto, hoy)
+    horas = analizar_horas(resto)
+    if fecha is None or not horas:
+        return (
+            f"No entendí el día y la hora 🙏 La cita #{pending.id} sigue PENDIENTE. "
+            f'Escribe por ejemplo "cambiar {pending.id} martes 10 am".'
+        )
+    h = horas[0]
+    hora, minuto = _hora_24(h.hora, h.minuto, h.meridiem)
+    dia = datetime.fromisoformat(fecha).date()
+    inicio = datetime(dia.year, dia.month, dia.day, hora, minuto, tzinfo=tz)
+    if inicio <= datetime.now(tz):
+        return f"Ese horario ya pasó. La cita #{pending.id} sigue PENDIENTE; propón otro."
+    fin = inicio + (pending.end_utc - pending.start_utc)
+    try:
+        hay_cupo = await ctx.calendar.hay_cupo(inicio, fin)
+    except CalendarError as exc:
+        logger.warning("approvals: no pude revisar cupo para #%s: %s", pending.id, exc)
+        return f"No pude revisar la agenda. La cita #{pending.id} sigue PENDIENTE."
+    if not hay_cupo:
+        return f"Ese horario ya está lleno en la agenda. La cita #{pending.id} sigue PENDIENTE; propón otro."
+    etiqueta = f"{_day_label_es(dia, hoy)}, {hora:02d}:{minuto:02d}"
+    await ctx.store.reagendar_pendiente(pending.id, inicio.astimezone(timezone.utc), fin.astimezone(timezone.utc), etiqueta)
+    pending.start_utc, pending.end_utc = inicio.astimezone(timezone.utc), fin.astimezone(timezone.utc)
+    pending.label = pending.dia_confirmado = etiqueta
+    return await resolver_aprobacion(ctx, pending, True)
 
 
 def parece_aprobacion(
@@ -364,14 +445,14 @@ async def _resolver(ctx: AppContext, pending: PendingBooking, aprobado: bool) ->
     await _notificar_lead(
         ctx,
         pending,
-        f"¡Confirmado! ✅ Te esperamos el {_sin_relativo(pending.label)} en {pending.direccion}.",
+        f"¡Confirmado! ✅ Tu visita quedó agendada para el {_sin_relativo(pending.label)} en {pending.direccion}.",
     )
     return f"Listo, cita #{pending.id} confirmada y avisado al cliente ✅"
 
 
 def _sin_relativo(etiqueta: str) -> str:
     """«mañana lunes 5 de octubre, 11:00» → «lunes 5 de octubre, 11:00»."""
-    return re.sub(r"^(hoy|mañana)\s+", "", etiqueta.strip())
+    return re.sub(r"^(hoy|mañana|el)\s+", "", etiqueta.strip())
 
 
 async def _actualizar_caso(ctx: AppContext, pending: PendingBooking, *, confirmada: bool) -> None:
@@ -478,7 +559,10 @@ async def atender_respuesta_del_dueno(ctx: AppContext, identity: str, inbound: l
     texto = " ".join((m.text or "") for m in inbound).strip()
     kind, pending, aprueba = parece_aprobacion(texto, pendientes)
     respuesta: str | None = None
-    if kind == "resuelto" and pending is not None and aprueba is not None:
+    propuesta, resto = parece_propuesta_de_horario(texto, pendientes) if kind != "resuelto" else (None, "")
+    if propuesta is not None:
+        respuesta = await proponer_horario(ctx, propuesta, resto)
+    elif kind == "resuelto" and pending is not None and aprueba is not None:
         respuesta = await resolver_aprobacion(ctx, pending, aprueba)
     elif kind == "formato_invalido":
         # Una pregunta, un comentario: NO aprueba ni rechaza. La visita sigue

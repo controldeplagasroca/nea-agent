@@ -183,7 +183,7 @@ async def test_resolver_aprobacion_aprobado_reserva_y_avisa_al_lead(
     assert lead_body["conversationId"] == CRM_CONV_ID
     # Mensaje definitivo SOLO después de la aprobación del dueño.
     assert "confirmado" in lead_body["text"].lower()
-    assert "te esperamos" in lead_body["text"].lower()
+    assert "quedó agendada" in lead_body["text"].lower()
 
     ficha_body = json.loads(ficha_route.calls[0].request.content)
     assert ficha_body["ficha"]["geo"] == "Calle Amores 123, depto 4B"

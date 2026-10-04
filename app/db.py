@@ -623,6 +623,21 @@ class PgStore(PgDispatchStore):
             pending_id,
         )
 
+    async def reagendar_pendiente(
+        self, pending_id: int, start_utc: datetime, end_utc: datetime, label: str
+    ) -> None:
+        await self.pool.execute(
+            """
+            UPDATE pending_bookings
+            SET start_utc = $2, end_utc = $3, label = $4, dia_confirmado = $4
+            WHERE id = $1
+            """,
+            pending_id,
+            start_utc,
+            end_utc,
+            label,
+        )
+
     async def resolve_pending_booking(self, pending_id: int, estado: str) -> None:
         await self.pool.execute(
             "UPDATE pending_bookings SET estado = $2, resolved_at = now() WHERE id = $1",

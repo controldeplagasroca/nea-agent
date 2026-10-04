@@ -164,6 +164,9 @@ class NullCalendarClient:
     async def reschedule_booking(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
         raise CalendarError("agenda no configurada (falta GOOGLE_SERVICE_ACCOUNT_JSON/GOOGLE_CALENDAR_ID)")
 
+    async def hay_cupo(self, *args: Any, **kwargs: Any) -> bool:
+        raise CalendarError("agenda no configurada (falta GOOGLE_SERVICE_ACCOUNT_JSON/GOOGLE_CALENDAR_ID)")
+
     async def cancel_booking(self, *args: Any, **kwargs: Any) -> None:
         raise CalendarError("agenda no configurada (falta GOOGLE_SERVICE_ACCOUNT_JSON/GOOGLE_CALENDAR_ID)")
 
@@ -440,6 +443,14 @@ class GoogleCalendarClient:
         if resp.status_code != 200:
             raise CalendarError(f"events.patch devolvió {resp.status_code}")
         return {}
+
+    async def hay_cupo(self, start: datetime, end: datetime) -> bool:
+        """¿Cabe una visita en [start, end) sin pasar de las visitas en paralelo?
+
+        No mira horario laboral ni aviso mínimo: lo usa el dueño, que puede sugerir
+        un horario fuera de ellos. Solo respeta la capacidad real del calendario.
+        """
+        return not await self._slot_busy(start, end)
 
     async def cancel_booking(self, event_id: str) -> None:
         resp = await self._request(

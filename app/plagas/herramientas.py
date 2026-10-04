@@ -37,6 +37,7 @@ from app.plagas import candados, catalogo, cobertura, diagnostico, precios
 from app.plagas.aviso import avisar_cita_agendada
 from app.plagas.caso import DIRECCION_CAMPOS, DIRECCION_NOMBRES, Caso
 from app.plagas.fechas import fecha_pedida
+from app.plagas.muebles import muebles_dichos
 from app.plagas.texto import normalizar
 from app.state import OfferedSlot
 from app.tools import (
@@ -876,6 +877,11 @@ class RuntimeDePlagas(ToolRuntime):
         if "m2" in utiles and not (nuevas.get("m2") or caso.variables.get("m2")):
             if (m2 := self.m2_dicho()) is not None:
                 nuevas["m2"] = m2
+        # Colchones, sillones y sillas que el cliente ya dijo con sus palabras (4 oct:
+        # los dio en su primer mensaje y el bot los volvió a preguntar).
+        for clave, cantidad in muebles_dichos(self._mensajes_lead).items():
+            if clave in utiles and clave not in nuevas and clave not in caso.variables:
+                nuevas[clave] = cantidad
         caso.variables.update(nuevas)
         cot = precios.cotizar(caso.plaga, caso.variables)
         nombre = catalogo.PLAGAS[caso.plaga]["nombre"]
