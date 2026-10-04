@@ -179,6 +179,13 @@ class Settings(BaseSettings):
     # `directa`: reserva de una vez en la agenda del CRM.
     agenda_modo: str = "aprobacion"
 
+    # Con calendario propio (Google Calendar), cómo se cierra la visita:
+    # `aprobacion` (por defecto): el cliente elige un horario LIBRE, se le dice que
+    # sí está disponible y que falta confirmarlo con el técnico designado, y el
+    # dueño lo aprueba con «sí N» desde su WhatsApp (el evento se crea entonces).
+    # `inmediata`: se agenda al instante en el calendario, sin aprobación.
+    agenda_confirmacion: str = "aprobacion"
+
     # WhatsApp del dueño, para avisarle cuando el agente le pasa una
     # conversación (solicitud de visita, cotización manual, alguien que pide
     # una persona). Vacío = sin aviso: la conversación solo aparece en la

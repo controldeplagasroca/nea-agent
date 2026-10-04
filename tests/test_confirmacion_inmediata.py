@@ -1,12 +1,14 @@
-"""4 oct (conversación de Ethel): la visita ya no es una «solicitud que el dueño debe
-autorizar»; con calendario propio es una CONFIRMACIÓN que se agenda al instante.
+"""4 oct (conversación de Ethel).
 
-Reglas del dueño:
-- El horario sale de la disponibilidad real: si está libre, queda agendada ya.
-- El cliente no oye «solicitud», «autorizar» ni que «el técnico te confirma»: oye que
-  quedó agendada y que cuando se designe técnico se le enviará un mensaje.
-- Las zonas de un solo día (Toluca, Lerma) siguen pasando por aprobación.
-- También: «niguna» (con errata) cuenta como ninguna; las arañas se preguntan dónde.
+POR DEFECTO (AGENDA_CONFIRMACION=aprobacion): el horario sale de la disponibilidad real
+y al cliente se le dice que SÍ está disponible y que falta confirmarlo con el técnico
+designado; el dueño lo aprueba con «sí N» y entonces se crea el evento. El cliente no oye
+«solicitud» ni «autorizar».
+
+OPCIÓN (AGENDA_CONFIRMACION=inmediata): se agenda al instante en el calendario y se le dice
+que cuando se designe técnico se le enviará un mensaje.
+
+También: «niguna» (con errata) cuenta como ninguna; las arañas se preguntan dónde.
 """
 from __future__ import annotations
 
@@ -28,9 +30,14 @@ INICIO = datetime(2026, 10, 5, 16, 0, tzinfo=timezone.utc)  # lunes 10:00 CDMX
 ETIQUETA = "mañana lunes 5 de octubre, 10:00"
 
 
-async def _rt(zona_restringida: bool = False, calendar=None):
+async def _rt(zona_restringida: bool = False, calendar=None, inmediata: bool = True):
+    """`inmediata=True` prueba la opción AGENDA_CONFIRMACION=inmediata (apagada por
+    defecto); `False`, el flujo normal: horario disponible, pendiente del técnico."""
     ctx = make_ctx(
-        make_settings(vertical="plagas", owner_wa_id="525529161746"),
+        make_settings(
+            vertical="plagas", owner_wa_id="525529161746",
+            agenda_confirmacion="inmediata" if inmediata else "aprobacion",
+        ),
         calendar=calendar or FakeCalendar(),
     )
     conv = await ctx.store.get_or_create_conversation(IDENTITY)
@@ -60,6 +67,42 @@ def _crm_falso():
 
 
 # ------------------------------------------------ se agenda al instante ---
+
+
+@respx.mock
+async def test_por_defecto_el_horario_disponible_queda_pendiente_del_tecnico_y_el_dueno_lo_aprueba():
+    rt, ctx = await _rt(inmediata=False)
+    envio = _crm_falso()
+
+    await rt._solicitar_visita(_slot(rt))
+
+    assert ctx.calendar.booking_calls == []  # el evento se crea cuando el dueño aprueba
+    pendientes = await ctx.store.list_pending_bookings_pendientes()
+    assert len(pendientes) == 1 and rt.caso.cita["folio"] == pendientes[0].id
+    assert rt.handoff_reason is None  # la IA sigue encendida
+    pedido = envio.calls.last.request.content.decode()
+    assert f"sí {pendientes[0].id}" in pedido and "por aprobar" in pedido  # el dueño responde por mensaje
+    texto = rt.texto_garantizado
+    assert "ese horario sí lo tenemos disponible" in texto and "mañana lunes 5 de octubre, 10:00" in texto
+    assert "falta confirmarlo con el técnico" in texto and "te avisamos por aquí" in texto
+    for prohibida in ("solicitud", "autoriz", "Leopoldo", "dueño", "ingeniero", "quedó agendada"):
+        assert prohibida not in texto, prohibida
+
+
+@respx.mock
+async def test_al_aprobar_el_dueno_se_crea_el_evento_y_el_cliente_recibe_la_confirmacion():
+    from app.approvals import resolver_aprobacion
+
+    rt, ctx = await _rt(inmediata=False)
+    envio = _crm_falso()
+    await rt._solicitar_visita(_slot(rt))
+    pend = (await ctx.store.list_pending_bookings_pendientes())[0]
+
+    await resolver_aprobacion(ctx, pend, True)
+
+    assert len(ctx.calendar.booking_calls) == 1
+    mensaje = envio.calls.last.request.content.decode()
+    assert "Confirmado" in mensaje and "lunes 5 de octubre, 10:00" in mensaje
 
 
 @respx.mock
@@ -126,7 +169,8 @@ async def test_en_zonas_de_un_solo_dia_sigue_la_aprobacion_del_dueno():
     assert ctx.calendar.booking_calls == []  # el calendario no se toca hasta que apruebe
     assert rt.caso.cita["estado"] == "pendiente_de_aprobacion"
     assert len(await ctx.store.list_pending_bookings_pendientes()) == 1
-    assert "Todavía no está confirmada" in rt.texto_garantizado
+    assert "falta confirmarlo con el técnico" in rt.texto_garantizado
+    assert "En tu zona damos servicio los miércoles" in rt.texto_garantizado
 
 
 async def test_confirmada_el_paso_no_habla_de_solicitud_y_cubre_cancelar():
