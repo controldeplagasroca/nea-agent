@@ -390,15 +390,17 @@ PLAGAS: dict[str, dict[str, Any]] = {
         # comedor están incluidos; cada sillón de más +$100 y cada silla de más +$20.
         "precio": {
             "tipo": "calculadora_colchones",
-            "variables": ["colchones", "sillones", "sillas_comedor"],
+            "variables": ["colchones", "sillones", "sillas_comedor", "sillas_secretariales"],
             "un_colchon": 1300, "dos_colchones": 1500, "colchon_adicional": 250,
             "sillones_incluidos": 3, "sillon_extra": 100,
             "sillas_incluidas": 6, "silla_extra": 20,
+            # Sillas secretariales: hasta 2 sin costo; de la 3ª en adelante +$50 c/u.
+            "secretariales_incluidas": 2, "secretarial_extra": 50,
             # Se preguntan juntos, en UN mensaje (antes eran tres preguntas seguidas).
             "pregunta_conjunta": (
-                "¿Cuántos colchones, sillones y sillas de comedor tapizadas hay en "
-                "total en toda la casa? Cuento todos, no solo los del problema, y "
-                "si no hay de alguno dime 0."
+                "¿Cuántos colchones, sillones, sillas de comedor tapizadas y sillas "
+                "secretariales hay en total en toda la casa? Cuento todos, no solo "
+                "los del problema, y si no hay de alguno dime 0."
             ),
         },
         "senales": {
@@ -634,6 +636,10 @@ VARIABLES: dict[str, dict[str, Any]] = {
     "sillas_comedor": {
         "pregunta": "¿Cuántas sillas de comedor tapizadas hay?",
         "descripcion": "sillas de comedor totales (número)",
+    },
+    "sillas_secretariales": {
+        "pregunta": "¿Cuántas sillas secretariales (de oficina) hay?",
+        "descripcion": "sillas secretariales o de oficina totales (número)",
     },
 }
 
