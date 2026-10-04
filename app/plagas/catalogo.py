@@ -409,26 +409,37 @@ PLAGAS: dict[str, dict[str, Any]] = {
                 "pregunta": "",
                 "claves": ["chinche"],
                 "no_preguntar": True,
+                # `detecta`: el servidor la reconoce en lo que el lead ESCRIBIÓ,
+                # aunque el modelo no la haya etiquetado (texto normalizado).
+                "detecta": r"chinche",
             },
             "bicho_visto": {
                 "texto": "vio los insectos (cabecera, costuras, colchón)",
                 "pregunta": "¿Has visto los insectos, por ejemplo detrás de la cabecera o en las costuras del colchón?",
                 "claves": ["chinche", "animalit", "bichit", "bicho", "insect", "los vi", "las vi", "vi unos", "vi una", "encontr"],
+                "detecta": (
+                    r"\b(vi|vimos|veo|vemos|encontr\w*|salen|aparecen|andan|hay)\b[^.?!]{0,40}"
+                    r"\b(animalit\w*|bichit\w*|bicho\w*|insect\w*|chinche\w*)\b"
+                    r"|\b(animalit\w*|bichit\w*|bicho\w*|insect\w*)\b[^.?!]{0,30}\b(cabecera|colchon|costura\w*|cama|sabana\w*)\b"
+                ),
             },
             "piquetes_linea": {
                 "texto": "piquetes en línea al despertar",
                 "pregunta": "¿Amanecen con piquetes en línea o en hilera?",
                 "claves": ["piquete", "ronch", "linea", "hilera", "amanec", "despert", "picad"],
+                "detecta": r"\bpiquete\w*|\bpicadura\w*|\bronch\w*|\bme (pican|picaron|amanezco picad\w*)",
             },
             "manchas_sabanas": {
                 "texto": "manchas oscuras o de sangre en las sábanas",
                 "pregunta": "¿Has visto manchitas oscuras o de sangre en las sábanas?",
                 "claves": ["mancha", "sangre", "sabana"],
+                "detecta": r"\bmanch\w*[^.?!]{0,40}\b(sabana\w*|cama|colchon|almohada|cabecera|sangre)\b|\bsangre\b[^.?!]{0,30}\b(sabana\w*|cama|colchon)\b",
             },
             "puntos_colchon": {
                 "texto": "puntos negros en las costuras del colchón",
                 "pregunta": "¿Has visto puntitos negros en las costuras del colchón?",
                 "claves": ["punto", "puntit", "costura", "colchon"],
+                "detecta": r"\bpuntos? negros?\b|\bpuntit\w* negr\w*|\bexcremento\w*|\bcostura\w*[^.?!]{0,30}\bpuntit\w*",
             },
             "viaje_o_mueble": {
                 "texto": "viaje reciente o mueble usado",

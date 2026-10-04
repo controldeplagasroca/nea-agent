@@ -139,6 +139,35 @@ def _validar(
         d.senales[clave] = cita[:160]
 
 
+def _detectar(
+    catalogo_senales: dict[str, dict[str, Any]], mensajes_lead: list[str], d: Diagnostico
+) -> None:
+    """Indicios que el lead YA dijo, reconocidos por el servidor.
+
+    No se depende de cómo los etiquete el modelo: en la prueba de chinches el
+    cliente contó manchas y piquetes y, aun así, el bot le siguió preguntando
+    porque una de las dos etiquetas no pasó. Solo cuentan señales con `detecta`
+    (un patrón sobre lo que el lead escribió) y no negadas («no he visto chinches»).
+    """
+    for clave, senal in catalogo_senales.items():
+        patron = senal.get("detecta")
+        if not patron or clave in d.senales:
+            continue
+        for mensaje in mensajes_lead:
+            plano = normalizar(mensaje)
+            hallado = next(
+                (
+                    m for m in re.finditer(patron, plano)
+                    if not _NEGADA.search(plano[max(0, m.start() - 26):m.start()])
+                ),
+                None,
+            )
+            if hallado is not None:
+                d.senales[clave] = mensaje.strip()[:160]
+                d.nuevas += 1
+                break
+
+
 def _cucaracha(d: Diagnostico, preguntadas: list[str]) -> Diagnostico:
     cat = catalogo.CUCARACHA_SENALES
     tipos: dict[str, set[str]] = {ALEMANA: set(), AMERICANA: set()}
@@ -229,6 +258,7 @@ def evaluar(
 
     senales = info["senales"]
     _validar(senales, propuestas, previas, mensajes_lead, ultimo_bot, hay_imagen, d)
+    _detectar(senales, mensajes_lead, d)
     if len(d.senales) >= MIN_SENALES:
         d.estado = "confirmada"
         return d
