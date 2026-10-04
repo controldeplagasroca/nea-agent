@@ -661,8 +661,12 @@ async def test_si_el_modelo_se_cicla_en_cotizar_no_se_queda_callado():
 async def test_la_precaucion_de_la_arana_solo_si_la_describe():
     from app.plagas.herramientas import bloque_de_tratamiento
 
-    assert "⚠️" not in bloque_de_tratamiento("arana", "tienen patas largas y hay telarañas")
-    assert "⚠️" in bloque_de_tratamiento("arana", "es negra con una mancha roja como reloj de arena")
+    from app.plagas import catalogo
+
+    tranquilidad = catalogo.PLAGAS["arana"]["tranquilidad_peligrosa"]
+    assert tranquilidad not in bloque_de_tratamiento("arana", "tienen patas largas y hay telarañas")
+    peligrosa = bloque_de_tratamiento("arana", "es negra con una mancha roja como reloj de arena")
+    assert tranquilidad in peligrosa and "⚠️" not in peligrosa
 
 
 async def test_al_tercer_insulto_el_motivo_es_hostilidad():

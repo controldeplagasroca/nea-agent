@@ -258,6 +258,9 @@ async def test_hora_que_si_coincide_se_agenda():
 async def _con_solicitud(ctx):
     """Una solicitud con folio ya registrada, con su expediente en la conversación."""
     rt = await _runtime(ctx)
+    # Solo en las zonas de un solo día el dueño aprueba cada visita; en el resto la
+    # visita se agenda al instante (ver tests/test_confirmacion_inmediata.py).
+    rt.caso.cobertura = {"zona": "Toluca", "dia_restringido": 2, "dia_nombre": "miércoles"}
     rt.caso.cita = {"label": "mañana lunes 5 de octubre, 11:00", "estado": "pendiente_de_aprobacion"}
     rt.caso.direccion = {"calle": "Matías Romero 1014", "colonia": "Valle Centro"}
     slot = OfferedSlot(conversation_id=rt._conv.id, start_utc=INICIO, end_utc=None,

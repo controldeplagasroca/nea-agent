@@ -26,8 +26,14 @@ OFERTA = {"startUtc": "2026-08-05T16:00:00Z", "endUtc": "2026-08-05T17:30:00Z",
           "dayLabel": "el miércoles 5 de agosto", "time": "10:00", "label": "mié 5 ago, 10:00"}
 
 
-async def _rt(mensajes: list[str]) -> tuple[RuntimeDePlagas, Any]:
-    ctx = make_ctx(make_settings(vertical="plagas", owner_wa_id="525529161746"), calendar=FakeCalendar())
+async def _rt(mensajes: list[str], calendario: bool = False) -> tuple[RuntimeDePlagas, Any]:
+    """Por defecto SIN calendario propio (agenda del CRM): ahí el horario que
+    propone el cliente se manda a verificar con el dueño. Con calendario propio se
+    consulta la disponibilidad (tests/test_confirmacion_inmediata.py)."""
+    ctx = make_ctx(
+        make_settings(vertical="plagas", owner_wa_id="525529161746"),
+        calendar=FakeCalendar() if calendario else None,
+    )
     conv = await ctx.store.get_or_create_conversation(IDENTITY)
     caso = Caso(plaga="cucaracha_alemana", turno=1)
     caso.cotizacion = {"precio": 1200.0, "linea": "$1,200 MXN por visita", "bloque": "", "turno": 0}
@@ -52,7 +58,6 @@ async def test_si_el_cliente_propone_horario_se_pasa_al_dueno(texto):
     assert res["estado"] == "horario_propuesto_en_verificacion"
     assert rt.handoff_reason == "cliente"
     assert "Se lo paso" in rt.texto_garantizado
-    assert ctx.calendar.availability_calls == []  # no se le ofrece nada
     assert "propio horario" in rt.caso.escalado
 
 
@@ -63,7 +68,7 @@ async def test_si_el_cliente_propone_horario_se_pasa_al_dueno(texto):
     "tengo 3 colchones",
 ])
 async def test_si_no_propone_nada_nea_ofrece_los_suyos(texto):
-    rt, ctx = await _rt([texto])
+    rt, ctx = await _rt([texto], calendario=True)
     ctx.calendar.availability_queue.append([OFERTA])
     res = await rt._propose_slots({})
     assert res.get("ok") is True and rt.handoff_reason is None

@@ -358,6 +358,17 @@ PLAGAS: dict[str, dict[str, Any]] = {
             "promo": "Promo 2x1: incluye control de alacrán sin costo adicional.",
         },
         "senales": {
+            # Lo primero que se pregunta (4 oct): ¿en el jardín o dentro de casa? Dónde
+            # las ve dice mucho de dónde viven y por dónde entran.
+            "ubicacion_arana": {
+                "texto": "dónde las ve: en el jardín o exterior, o dentro de la casa",
+                "pregunta": "¿Las has visto más en el jardín o en el exterior, o dentro de tu casa?",
+                "claves": ["jardin", "exterior", "afuera", "patio", "azotea", "terraza", "interior", "adentro", "dentro", "sala", "cocina", "recamara", "cuarto", "bano", "closet", "techo"],
+                "detecta": (
+                    r"\b(jardin\w*|exterior|afuera|patio|azotea|terraza|interior|adentro|sala|"
+                    r"cocina|recamara|cuarto|bano|closet)\b|\bdentro de (mi|la|el|casa|tu)\b"
+                ),
+            },
             "patas_largas": {
                 "texto": "patas largas y delgadas",
                 "pregunta": "¿Tienen las patas largas y delgaditas?",
@@ -379,9 +390,19 @@ PLAGAS: dict[str, dict[str, Any]] = {
                 "claves": ["rincon", "closet", "zapato", "esquina", "techo", "ropero", "bodega", "caja"],
             },
         },
-        # Seguridad (sección 4.3): sin alarmar ni diagnosticar picaduras. Solo
-        # se dice si el lead describió una araña así (ARANA_PELIGROSA).
-        "precaucion": "Por la que describes, ten cuidado extra al mover cosas guardadas (cajas, ropa, zapatos).",
+        # Seguridad (sección 4.3): sin alarmar ni diagnosticar picaduras. Se dice
+        # SOLO si el lead nombra una araña peligrosa (ARANA_PELIGROSA: violinista,
+        # viuda negra…). Texto del dueño (4 oct): no se puede saber a distancia cuál
+        # es; se le da tranquilidad de que se controla sea la que sea.
+        "tranquilidad_peligrosa": (
+            "Entiendo tu preocupación 🙏 Saber si es violinista o viuda negra solo se "
+            "puede capturándola para que un técnico especializado la identifique en el "
+            "momento de la visita, o con una foto muy nítida, porque se distinguen por "
+            "rasgos muy específicos. Lo importante es que nosotros las controlamos sea "
+            "cual sea la especie: las arañas viven y se desarrollan en el exterior, y van "
+            "entrando a los domicilios para refugiarse de condiciones del clima que no les "
+            "favorecen."
+        ),
     },
     "tijerilla": {
         "nombre": "Tijerilla", "emoji": "✂️",
