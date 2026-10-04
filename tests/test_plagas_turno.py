@@ -328,19 +328,46 @@ async def test_precio_sin_formula_lo_cotiza_el_dueno_con_los_datos_en_la_ficha()
     ctx = _ctx(llm)
     llm.replies += [
         _llama("verificar_cobertura", zona="Escandón", codigo_postal="11800"),
-        _llama("identificar_plaga", plaga="chinches", senales=[
-            {"senal": "piquetes_linea", "cita": "piquetes en línea"},
-            {"senal": "manchas_sabanas", "cita": "manchitas en las sábanas"},
+        _llama("identificar_plaga", plaga="pulgas", senales=[
+            {"senal": "piquetes_tobillos", "cita": "piquetes en los tobillos"},
+            {"senal": "saltan", "cita": "los bichitos saltan"},
         ]),
-        _dice("Son chinches de cama, 2 visitas. ¿Han aumentado?"),
+        _dice("Son pulgas, 2 visitas. ¿Han aumentado?"),
     ]
-    await _turno(ctx, "amanezco con piquetes en línea y hay manchitas en las sábanas, Escandón 11800", 1)
+    await _turno(ctx, "tengo piquetes en los tobillos y los bichitos saltan, Escandón 11800", 1)
     llm.replies += [_llama("cotizar", colchones=3, sillones=1, sillas_comedor=4), _dice("Cuesta $2,000")]
     texto = await _turno(ctx, "3 colchones, 1 sillón y 4 sillas, cuánto es", 2)
     assert texto is not None and "$" not in texto
     assert "Ing. Leopoldo" in texto
     assert ctx.crm.handoffs == ["modelo"]
     assert "colchones=3" in ctx.crm.ficha["datos_cotizacion"]
+
+
+async def test_chinches_se_confirman_con_dos_indicios_y_se_cotizan_sin_dar_vueltas():
+    """La prueba de Mariana: «tengo chinches» + manchas y bichos en la cabecera
+    bastan. Con 4 colchones, 3 sillones y 6 sillas son $2,000 por visita."""
+    llm = FakeLLM()
+    ctx = _ctx(llm)
+    llm.replies += [
+        _llama("verificar_cobertura", zona="Escandón", codigo_postal="11800"),
+        _llama("identificar_plaga", plaga="chinches", senales=[
+            {"senal": "dice_chinches", "cita": "tengo chinches"},
+            {"senal": "manchas_sabanas", "cita": "manchas en las sábanas"},
+        ]),
+        _dice("Son chinches de cama, 2 visitas. ¿Han aumentado?"),
+    ]
+    await _turno(ctx, "tengo chinches, he visto manchas en las sábanas, Escandón 11800", 1)
+    caso = await _caso(ctx)
+    assert caso["plaga"] == "chinches"  # confirmadas a la primera: nada de seguir interrogando
+
+    llm.replies += [
+        _llama("cotizar", colchones=4, sillones=3, sillas_comedor=6),
+        _dice("x"),
+    ]
+    texto = await _turno(ctx, "4 colchones, 3 sillones y 6 sillas, cuánto es", 2)
+    assert texto is not None and "$2,000" in texto
+    assert "por visita" in texto and "Cucaracha" not in texto
+    assert ctx.crm.handoffs == []  # ya no se le pasa al dueño: se cotiza solo
 
 
 async def test_cliente_recurrente_no_se_cotiza():

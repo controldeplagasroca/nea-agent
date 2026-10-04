@@ -15,8 +15,8 @@ Después de editarlo: `pytest -q` y redesplegar.
 |---|---|---|---|
 | Cucaracha americana | La **tarifa base** por tipo de inmueble (casa, departamento, edificio). La regla de los sanitarios ya está: hasta 3 incluidos, $100 por cada adicional, en cada visita. | `PLAGAS["cucaracha_americana"]["precio"]["base"]` | Pregunta tipo de inmueble, registros y sanitarios, los anota en la ficha y pasa al dueño. |
 | Roedores | Cada cuántos **metros va una caja cebadero** y el **precio por caja**. | `…["roedores"]["precio"]["m_por_caja"]` y `["precio_por_caja"]` | Pregunta el área, la anota y pasa al dueño. Nunca le pregunta al lead cuántas cajas. |
-| Chinches de cama | **Precio por colchón, por sillón y por silla** (y cargo base, si hay). | `…["chinches"]["precio"]` | Pregunta colchones totales, sillones y sillas, los anota y pasa al dueño. |
-| Pulgas | Lo mismo que chinches. | `…["pulgas"]["precio"]` | Igual. |
+| ~~Chinches de cama~~ | **Resuelto (3 oct 2026).** Por visita: 1 colchón $1,300; 2 colchones $1,500; +$250 por colchón adicional. Hasta 3 sillones y 6 sillas de comedor van incluidos; +$100 por sillón y +$20 por silla de más. | `…["chinches"]["precio"]` | Cotiza sola. Pide colchones, sillones y sillas en un solo mensaje. |
+| Pulgas | Lo mismo que chinches (la fórmula de pulgas no se ha dado). | `…["pulgas"]["precio"]` | Pregunta colchones totales, sillones y sillas, los anota y pasa al dueño. |
 
 En cuanto esos `None` tengan número, la calculadora ya escrita en
 `app/plagas/precios.py` cotiza sola y arma el resumen. Hay una prueba que lo

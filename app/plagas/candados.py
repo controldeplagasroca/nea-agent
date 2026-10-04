@@ -432,7 +432,7 @@ def _preguntas_de_identificacion(plaga: str) -> list[str]:
     if plaga.startswith("cucaracha"):
         return [catalogo.PREGUNTA_CUCARACHA_TAMANO, catalogo.PREGUNTA_CUCARACHA_UBICACION]
     senales = (catalogo.PLAGAS.get(plaga) or {}).get("senales") or {}
-    return [s["pregunta"] for s in senales.values()]
+    return [s["pregunta"] for s in senales.values() if s.get("pregunta")]
 
 
 def repregunta_identificacion(texto: str, plaga: str | None) -> str:
