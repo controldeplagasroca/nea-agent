@@ -86,6 +86,13 @@ def limpiar_variables(crudas: dict[str, Any] | None) -> dict[str, Any]:
     return out
 
 
+def _muebles(colchones: int, sillones: int, sillas: int) -> str:
+    """«4 colchones, 3 sillones, 6 sillas»: en singular donde toca y sin ceros."""
+    partes = [(colchones, "colchón", "colchones"), (sillones, "sillón", "sillones"),
+              (sillas, "silla", "sillas")]
+    return ", ".join(f"{n} {uno if n == 1 else varios}" for n, uno, varios in partes if n)
+
+
 def _falta(plaga: str, variables: dict[str, Any], clave: str, pregunta: str = "") -> Cotizacion:
     return Cotizacion(
         "falta", plaga, variables, falta=clave,
@@ -222,6 +229,33 @@ def cotizar(plaga: str, variables: dict[str, Any] | None) -> Cotizacion:
         return Cotizacion(
             "ok", plaga, v, precio=precio,
             linea_precio=f"{dinero(precio)} por visita ({v['m2']} m²)",
+        )
+
+    if tipo == "calculadora_colchones":
+        faltan = [c for c in regla["variables"] if c not in v]
+        if faltan:
+            # Si no se sabe nada, los tres datos se piden en UN solo mensaje.
+            conjunta = regla["pregunta_conjunta"] if len(faltan) == len(regla["variables"]) else ""
+            return _falta(plaga, v, faltan[0], conjunta)
+        n, sillones, sillas = v["colchones"], v["sillones"], v["sillas_comedor"]
+        if n < 1:
+            return _dueno(plaga, v, "sin colchones: lo revisa el negocio")
+        base = (
+            regla["un_colchon"] if n == 1
+            else regla["dos_colchones"] + regla["colchon_adicional"] * (n - 2)
+        )
+        de_sillones = max(0, sillones - regla["sillones_incluidos"]) * regla["sillon_extra"]
+        de_sillas = max(0, sillas - regla["sillas_incluidas"]) * regla["silla_extra"]
+        precio = base + de_sillones + de_sillas
+        extras = []
+        if de_sillones or de_sillas:
+            extras.append(
+                f"Incluye hasta {regla['sillones_incluidos']} sillones y "
+                f"{regla['sillas_incluidas']} sillas de comedor; los de más se suman."
+            )
+        return Cotizacion(
+            "ok", plaga, v, precio=precio, extras=extras,
+            linea_precio=f"{dinero(precio)} por visita ({_muebles(n, sillones, sillas)})",
         )
 
     if tipo == "calculadora_muebles":

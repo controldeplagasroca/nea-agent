@@ -53,3 +53,52 @@ async def test_cucaracha_alemana_y_americana_son_la_misma_familia():
 ])
 def test_la_ultima_plaga_nombrada_es_la_que_manda(texto, esperada):
     assert _ultima_plaga_nombrada(texto) == esperada
+
+
+# ------------------------------------------- diagnóstico de chinches (3 oct) ---
+
+
+def _evaluar(senales, mensajes):
+    from app.plagas import diagnostico
+
+    return diagnostico.evaluar("chinches", senales, mensajes_lead=mensajes)
+
+
+def test_dos_indicios_ya_confirman_chinches():
+    d = _evaluar(
+        [{"senal": "dice_chinches", "cita": "Tengo chinches"},
+         {"senal": "manchas_sabanas", "cita": "He visto manchas en las sábanas"}],
+        ["Tengo chinches", "He visto manchas en las sábanas y detrás de la cabecera animalitos"],
+    )
+    assert d.estado == "confirmada" and d.plaga == "chinches"
+
+
+def test_ver_los_bichos_cuenta_como_indicio():
+    d = _evaluar(
+        [{"senal": "manchas_sabanas", "cita": "manchas en las sábanas"},
+         {"senal": "bicho_visto", "cita": "detrás de la cabecera animalitos"}],
+        ["He visto manchas en las sábanas y detrás de la cabecera animalitos"],
+    )
+    assert d.estado == "confirmada"
+
+
+def test_un_solo_indicio_todavia_no_confirma_y_no_se_pregunta_por_el_viaje():
+    d = _evaluar(
+        [{"senal": "dice_chinches", "cita": "Tengo chinches"}], ["Tengo chinches"]
+    )
+    assert d.estado == "faltan_senales"
+    assert d.senal_preguntada == "bicho_visto" or d.senal_preguntada == "piquetes_linea"
+    assert "viaje" not in d.pregunta and "chinches?" not in d.pregunta
+
+
+def test_nunca_se_pregunta_por_viajes_ni_por_si_dice_que_son_chinches():
+    from app.plagas import catalogo, diagnostico
+
+    d = diagnostico.evaluar("chinches", [], mensajes_lead=[])
+    preguntadas: list[str] = []
+    for _ in range(10):
+        d = diagnostico.evaluar("chinches", [], preguntadas=preguntadas, mensajes_lead=[])
+        if not d.senal_preguntada:
+            break
+        assert d.senal_preguntada not in ("viaje_o_mueble", "dice_chinches")
+        preguntadas.append(d.senal_preguntada)

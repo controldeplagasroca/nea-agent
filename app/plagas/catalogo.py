@@ -385,13 +385,36 @@ PLAGAS: dict[str, dict[str, Any]] = {
             "cabecera y closets, más aspersión líquida complementaria. "
             "Sillones y sillas se tratan solo con líquido, por el textil."
         ),
+        # Fórmula del dueño (3 oct 2026), POR VISITA: 1 colchón $1,300; 2 colchones
+        # $1,500; cada colchón adicional +$250. Hasta 3 sillones y 6 sillas de
+        # comedor están incluidos; cada sillón de más +$100 y cada silla de más +$20.
         "precio": {
-            "tipo": "calculadora_muebles",
+            "tipo": "calculadora_colchones",
             "variables": ["colchones", "sillones", "sillas_comedor"],
-            # PENDIENTE: precio por colchón, sillón y silla.
-            "por_colchon": None, "por_sillon": None, "por_silla": None, "base": None,
+            "un_colchon": 1300, "dos_colchones": 1500, "colchon_adicional": 250,
+            "sillones_incluidos": 3, "sillon_extra": 100,
+            "sillas_incluidas": 6, "silla_extra": 20,
+            # Se preguntan juntos, en UN mensaje (antes eran tres preguntas seguidas).
+            "pregunta_conjunta": (
+                "¿Cuántos colchones, sillones y sillas de comedor tapizadas hay en "
+                "total en toda la casa? Cuento todos, no solo los del problema, y "
+                "si no hay de alguno dime 0."
+            ),
         },
         "senales": {
+            # Cualquier DOS bastan. Dos de las que el cliente ya contó en sus
+            # primeras respuestas confirman: no se le interroga por las demás.
+            "dice_chinches": {
+                "texto": "el cliente dice que son chinches",
+                "pregunta": "",
+                "claves": ["chinche"],
+                "no_preguntar": True,
+            },
+            "bicho_visto": {
+                "texto": "vio los insectos (cabecera, costuras, colchón)",
+                "pregunta": "¿Has visto los insectos, por ejemplo detrás de la cabecera o en las costuras del colchón?",
+                "claves": ["chinche", "animalit", "bichit", "bicho", "insect", "los vi", "las vi", "vi unos", "vi una", "encontr"],
+            },
             "piquetes_linea": {
                 "texto": "piquetes en línea al despertar",
                 "pregunta": "¿Amanecen con piquetes en línea o en hilera?",
@@ -411,6 +434,8 @@ PLAGAS: dict[str, dict[str, Any]] = {
                 "texto": "viaje reciente o mueble usado",
                 "pregunta": "¿Hubo un viaje reciente o llegó algún mueble usado a casa?",
                 "claves": ["viaj", "hotel", "mueble usad", "segunda mano", "usado", "airbnb", "mudanza"],
+                # Si lo cuenta, suma; pero no se le interroga por esto.
+                "no_preguntar": True,
             },
         },
     },

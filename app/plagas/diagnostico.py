@@ -233,6 +233,8 @@ def evaluar(
         d.estado = "confirmada"
         return d
     for clave, s in senales.items():
+        if s.get("no_preguntar"):
+            continue  # cuenta si el lead la dice solo, pero no se le pregunta
         if clave not in d.senales and clave not in preguntadas:
             d.pregunta, d.senal_preguntada = s["pregunta"], clave
             return d
