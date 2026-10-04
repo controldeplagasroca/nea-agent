@@ -34,6 +34,9 @@ class Diagnostico:
     pregunta: str = ""  # la siguiente pregunta, ya redactada
     senal_preguntada: str = ""
     atasco: bool = False  # cucarachas: la comparación simple no avanzó
+    # Cucarachas: el lead describió LAS DOS especies (chicas en un lado, grandes en
+    # otro). No se le pide que elija una ni una foto: tiene las dos.
+    ambas: bool = False
     avisos: list[str] = field(default_factory=list)
 
 
@@ -170,6 +173,14 @@ def _detectar(
 
 def _cucaracha(d: Diagnostico, preguntadas: list[str]) -> Diagnostico:
     cat = catalogo.CUCARACHA_SENALES
+    # Dijo que las hay chicas Y grandes y en dos lugares distintos («en la cocina
+    # chiquita y en el baño grandes»): son las dos especies. Antes esto no
+    # confirmaba ninguna, se le mostraba la comparación, se le pedía una foto y
+    # la conversación terminaba pasada a una persona sin resolver nada.
+    ubicaciones = {k for k in d.senales if cat[k]["tipo"] == "ubicacion"}
+    if "tamano_chica" in d.senales and "tamano_grande" in d.senales and len(ubicaciones) >= 2:
+        d.estado, d.plaga, d.ambas = "confirmada", ALEMANA, True
+        return d
     tipos: dict[str, set[str]] = {ALEMANA: set(), AMERICANA: set()}
     hay_tamano = hay_ubicacion = False
     for clave in d.senales:
@@ -187,8 +198,14 @@ def _cucaracha(d: Diagnostico, preguntadas: list[str]) -> Diagnostico:
     # Rasgos de las dos especies no confirman ninguna por mayoría: «chiquitas,
     # en la cocina… y también en el patio» puede ser las dos. Solo la elección
     # en la tarjeta desempata (el lead ya vio las dos descritas y escogió).
+    # El comportamiento («vuelan», «se esconden y hay muchas juntas») también
+    # desempata, cuando solo una de las dos lo tiene a su favor.
     for propia, otra, n, m in ((ALEMANA, AMERICANA, a, b), (AMERICANA, ALEMANA, b, a)):
-        if n >= MIN_SENALES and n > m and (m == 0 or "eleccion" in tipos[propia]):
+        desempata = (
+            "eleccion" in tipos[propia]
+            or ("comportamiento" in tipos[propia] and "comportamiento" not in tipos[otra])
+        )
+        if n >= MIN_SENALES and n > m and (m == 0 or desempata):
             d.estado, d.plaga = "confirmada", propia
             return d
 
@@ -210,9 +227,14 @@ def _cucaracha(d: Diagnostico, preguntadas: list[str]) -> Diagnostico:
         )
         d.senal_preguntada = "ubicacion_extra"
     else:
-        # Ya se preguntó tamaño y ubicación y no cierran en una especie
-        # (no supo contestar, o los datos apuntan a especies distintas):
-        # toca la tarjeta comparativa, que la garantiza el servidor.
+        # Tamaño y lugar no cierran en una especie (no supo contestar, o los datos
+        # apuntan a las dos): se sigue por COMPORTAMIENTO, no por foto (muchas salen
+        # borrosas y ni un experto puede decidir con ellas).
+        for clave, pregunta in catalogo.PREGUNTAS_CUCARACHA_COMPORTAMIENTO:
+            if clave not in preguntadas:
+                d.pregunta, d.senal_preguntada = pregunta, clave
+                return d
+        # Ya se preguntó todo: toca la tarjeta comparativa, que la garantiza el servidor.
         d.atasco = True
     return d
 

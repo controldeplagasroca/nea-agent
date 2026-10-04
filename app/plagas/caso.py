@@ -53,6 +53,9 @@ class Caso:
     sondas: int = 0  # intentos de sonsacar modelo/instrucciones
     otras: int = 0  # veces que el modelo dijo «otra plaga» sin nombrarla
     escalado: str = ""  # por qué se le pasó al dueño, si ya pasó
+    # Cucaracha alemana Y americana a la vez (chicas en un lado, grandes en otro).
+    # `plaga` queda en la alemana; el precio de las dos lo define un técnico.
+    ambas: bool = False
 
     @classmethod
     def desde(cls, crudo: Any) -> "Caso":

@@ -124,3 +124,21 @@ Y cuatro cosas que los audios no alcanzan a definir:
 - **Rutas por zona.** Lo de acomodar las visitas por ruta (norte, sur…) lo
   dejaste para después, y así quedó: hoy cada visita llega como solicitud y la
   acomodas tú.
+
+
+## 10. Dos cucarachas a la vez, sin fotos, sin nombrar al dueño (4 oct 2026)
+
+- **Las dos especies (alemana y americana):** si el cliente dice que las hay chicas y
+  grandes en dos lugares distintos («en la cocina chiquitas y en el baño grandes»),
+  Nea confirma las dos, explica el tratamiento de cada una y, al pedir precio,
+  le pide el tipo de inmueble y pasa la cotización a «un técnico especializado».
+  **Falta que definas cómo se cobra cuando hay las dos** (¿se suman?, ¿precio único?);
+  mientras tanto Nea no da cifra.
+- **Sin fotos:** Nea ya no pide fotos. Si tamaño y lugar no cierran, pregunta por el
+  comportamiento (vuelan o patinan / se esconden; muchas juntas de varios tamaños o
+  de una en una) y, si aún no cierra, muestra la comparación y después pasa el caso.
+  Si el cliente manda una foto por su cuenta, sí la usa. Se cambia en
+  `CUCARACHA_SENALES` y `PREGUNTAS_CUCARACHA_COMPORTAMIENTO`.
+- **Nunca se nombra al dueño** (ni «Ing. Leopoldo», ni «el dueño», ni «el jefe»): al
+  cliente se le dice «un técnico especializado» (`NEGOCIO["dueno"]`). Un candado
+  reescribe cualquier mensaje del modelo que lo nombre.

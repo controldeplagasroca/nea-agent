@@ -17,7 +17,10 @@ from typing import Any
 
 NEGOCIO = {
     "nombre": "Control de Plagas ROCA",
-    "dueno": "el Ing. Leopoldo",
+    # Con quién se le dice al CLIENTE que habla cuando se le pasa su caso. Nunca
+    # se menciona al dueño ni su nombre: es «un técnico especializado». (Quién es
+    # de verdad lo sabe solo el dueño, en su WhatsApp.)
+    "dueno": "un técnico especializado",
     "moneda": "MXN",
     "pago": "Se liquida al término de cada visita.",
     # Solo se dice si el lead pide factura (especificación, sección 5).
@@ -95,7 +98,44 @@ CUCARACHA_SENALES: dict[str, dict[str, Any]] = {
         "texto": "tras ver la comparación, dijo que se parece a la americana (la grande de drenaje)",
         "claves": ["americana", "segunda", "grande", "drenaje", "la 2", "grandota"],
     },
+    # Comportamiento e incidencia: cuando tamaño y lugar no cierran, se sigue
+    # identificando por cómo se comportan (no se pide foto: muchas salen
+    # borrosas y ni un experto puede decidir con ellas).
+    "comp_vuela_patina": {
+        "especie": "cucaracha_americana", "tipo": "comportamiento",
+        "texto": "las ha visto volar o patinar por el piso",
+        "claves": ["vuel", "volad", "patin", "planea"],
+    },
+    "comp_aisladas": {
+        "especie": "cucaracha_americana", "tipo": "comportamiento",
+        "texto": "se ven de una en una, aisladas, o salen cuando llueve",
+        "claves": ["una sola", "de una en una", "una a la vez", "aislad", "solitar", "de vez en cuando", "ocasional", "lluvia", "llueve", "una que otra"],
+    },
+    "comp_se_esconden": {
+        "especie": "cucaracha_alemana", "tipo": "comportamiento",
+        "texto": "se esconden rápido cuando prende la luz y salen de noche",
+        "claves": ["escond", "huyen", "corren rapido", "corre rapido", "prendo la luz", "enciendo la luz", "de noche", "por la noche"],
+    },
+    "comp_muchas_juntas": {
+        "especie": "cucaracha_alemana", "tipo": "comportamiento",
+        "texto": "se ven muchas juntas, de varios tamaños (también bebés)",
+        "claves": ["muchas", "varias", "juntas", "bebe", "ninfa", "distintos tamanos", "varios tamanos", "todos los tamanos", "bolitas"],
+    },
 }
+
+# Preguntas de comportamiento, en orden; cada una se hace UNA vez.
+PREGUNTAS_CUCARACHA_COMPORTAMIENTO: list[tuple[str, str]] = [
+    (
+        "comportamiento_1",
+        "¿Las has visto volar o patinar por el piso, o más bien se esconden "
+        "rápido cuando prendes la luz?",
+    ),
+    (
+        "comportamiento_2",
+        "¿Se ven muchas juntas, de varios tamaños (también chiquitas), o "
+        "aparecen de una en una?",
+    ),
+]
 
 PREGUNTA_CUCARACHA_TAMANO = (
     "¿De qué tamaño son: chiquitas (1 a 2 cm, café claro) o grandes "

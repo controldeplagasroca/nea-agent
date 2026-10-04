@@ -286,6 +286,10 @@ async def test_la_tarjeta_comparativa_la_garantiza_el_servidor():
         ]),
         _dice("Parece alemana, la que sale de las coladeras."),  # mezcla de rasgos: no sale
     ]
+    conv = await ctx.store.get_or_create_conversation(LEAD)
+    await ctx.store.update_conversation(
+        conv.id, caso={"preguntadas": ["tamano", "ubicacion", "comportamiento_1", "comportamiento_2"]}
+    )
     texto = await _turno(ctx, "son chiquitas y salen de la coladera", 1)
     assert texto == catalogo.TARJETA_CUCARACHAS
     caso = await _caso(ctx)
@@ -340,7 +344,7 @@ async def test_precio_sin_formula_lo_cotiza_el_dueno_con_los_datos_en_la_ficha()
     llm.replies += [_llama("cotizar", colchones=3, sillones=1, sillas_comedor=4), _dice("Cuesta $2,000")]
     texto = await _turno(ctx, "3 colchones, 1 sillón y 4 sillas, cuánto es", 2)
     assert texto is not None and "$" not in texto
-    assert "Ing. Leopoldo" in texto
+    assert "técnico especializado" in texto
     assert ctx.crm.handoffs == ["modelo"]
     assert "colchones=3" in ctx.crm.ficha["datos_cotizacion"]
 
@@ -402,7 +406,7 @@ async def test_chinches_el_modelo_no_etiqueta_y_aun_asi_se_confirma_y_se_sigue_a
 async def test_cliente_recurrente_no_se_cotiza():
     llm = FakeLLM([
         _llama("cotizar", tipo_inmueble="casa"),
-        _dice("Permíteme un momento mientras te comunico con el Ing. Leopoldo."),
+        _dice("Permíteme un momento mientras te comunico con un técnico especializado."),
     ])
     ctx = _ctx(llm)
     await _turno(ctx, "Hola Leopoldo, quiero programar mi siguiente visita", 1)
@@ -516,7 +520,7 @@ async def test_no_se_fuerza_nada_ante_una_persona_que_pide_humano():
     ])
     ctx = _ctx(llm)
     await _turno(ctx, "tengo cucarachas, Del Valle 03100", 1)
-    llm.replies += [_llama("handoff", reason="cliente"), _dice("Te comunico con el Ing. Leopoldo.")]
+    llm.replies += [_llama("handoff", reason="cliente"), _dice("Te comunico con un técnico especializado.")]
     await _turno(ctx, "quiero hablar con una persona", 2)
     assert llm.calls[-1].get("tool_choice") is None
     assert ctx.crm.handoffs == ["cliente"]
@@ -601,6 +605,10 @@ async def test_la_eleccion_en_la_tarjeta_vale_hasta_el_turno_siguiente():
         _dice("x"),
     ])
     ctx = _ctx(llm)
+    conv = await ctx.store.get_or_create_conversation(LEAD)
+    await ctx.store.update_conversation(
+        conv.id, caso={"preguntadas": ["tamano", "ubicacion", "comportamiento_1", "comportamiento_2"]}
+    )
     texto = await _turno(ctx, "son chiquitas y salen de la coladera", 1)
     assert texto == catalogo.TARJETA_CUCARACHAS
     assert (await _caso(ctx))["plaga"] is None

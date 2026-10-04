@@ -48,11 +48,11 @@ MAX_FRASE_DE_CONFIRMACION = 190
 # dueño pidió que ese momento se explique completo («yo sí lo doy a detalle»).
 TOPE_DE_CONFIRMACION = 640
 
-# Primer atasco: tarjeta comparativa. Segundo: se pide una foto (repetir la
-# tarjeta era un bucle — sección 15 de la especificación). Tercero: lo ve una
-# persona.
-ATASCOS_PARA_FOTO = 2
-ATASCOS_PARA_DUENO = 3
+# Cucarachas: tras las preguntas de tamaño, lugar y comportamiento, primer atasco:
+# tarjeta comparativa (repetirla era un bucle — sección 15 de la especificación).
+# Segundo atasco: lo ve una persona. Ya NO se pide foto: muchas salen borrosas y ni
+# un experto puede decidir con ellas (si el cliente la manda sola, se usa).
+ATASCOS_PARA_DUENO = 2
 
 _SENALES_GUIA = "id de la señal, tal cual aparece en la GUÍA DE IDENTIFICACIÓN"
 
@@ -612,7 +612,7 @@ class RuntimeDePlagas(ToolRuntime):
         if d.senal_preguntada and d.senal_preguntada not in caso.preguntadas:
             caso.preguntadas.append(d.senal_preguntada)
 
-        if d.estado == "confirmada" and caso.plaga == d.plaga:
+        if d.estado == "confirmada" and caso.plaga == d.plaga and caso.ambas == d.ambas:
             # Ya estaba confirmada: nada cambia y no se vuelve a explicar.
             return {
                 "ok": True,
@@ -633,10 +633,24 @@ class RuntimeDePlagas(ToolRuntime):
             }
         if d.estado == "confirmada":
             assert d.plaga is not None
-            if caso.plaga != d.plaga:
+            if caso.plaga != d.plaga or caso.ambas != d.ambas:
                 # Otra plaga = otra cotización. Lo del inmueble se conserva.
                 caso.cotizacion, caso.aceptada = None, False
             caso.plaga, caso.turno_plaga, caso.atascos = d.plaga, caso.turno, 0
+            caso.ambas = d.ambas
+            if d.ambas:
+                # Tiene las dos cucarachas: el servidor escribe TODO el mensaje (el
+                # modelo mezclaba rasgos de una y otra), y no se le pide elegir ni foto.
+                await self._ficha({"plaga": "Cucaracha alemana y americana"})
+                self.texto_garantizado = bloque_de_dos_cucarachas()
+                return {
+                    "ok": True,
+                    "estado": "confirmada_las_dos",
+                    "instrucciones": (
+                        "Tiene las DOS cucarachas (alemana y americana). Ya se le "
+                        "explicó el tratamiento de cada una. No agregues nada."
+                    ),
+                }
             await self._ficha({"plaga": catalogo.PLAGAS[d.plaga]["nombre"]})
             # El tratamiento lo escribe el servidor: en la autoprueba el modelo
             # parafraseaba «polvo focalizado» como «gel y cebo» (el de la
@@ -716,29 +730,25 @@ class RuntimeDePlagas(ToolRuntime):
         return {"ok": True, "estado": "fuera_de_catalogo", "instrucciones": "Ya se le avisó al lead y se le pasó al dueño."}
 
     async def _atasco(self, d: diagnostico.Diagnostico, base: dict[str, Any]) -> dict[str, Any]:
-        """La comparación simple no cerró: tarjeta → foto → dueño."""
+        """Las preguntas no cerraron: tarjeta comparativa → una persona (sin foto)."""
         caso = self.caso
         if self.texto_garantizado:
             # Otra llamada en el MISMO turno: el atasco ya se contó y su texto
-            # (tarjeta o foto) ya va a salir. Contarlo dos veces brincaba de la
-            # tarjeta a la foto sin que el lead viera la tarjeta.
+            # (la tarjeta) ya va a salir. Contarlo dos veces brincaba de la
+            # tarjeta al pase sin que el lead viera la tarjeta.
             base["instrucciones"] = "Ya se le mandó la comparación; espera su respuesta."
             return base
         caso.atascos += 1
         es_cucaracha = (d.plaga or "").startswith("cucaracha")
-        if caso.atascos >= ATASCOS_PARA_DUENO or (caso.foto_pedida and not self._hay_imagen):
+        if not es_cucaracha or caso.atascos >= ATASCOS_PARA_DUENO:
             await self._escalar(
                 "modelo",
                 f"No se pudo identificar la plaga por chat ({caso.candidata})",
                 "Para no darte un diagnóstico equivocado, prefiero que lo revise "
-                "directamente una persona. " + self._puente(),
+                f"{catalogo.NEGOCIO['dueno']}. Ya le pasé lo que me contaste para que "
+                "te responda por aquí 🙌",
             )
-            base["instrucciones"] = "Ya se le avisó al lead y se le pasó al dueño."
-            return base
-        if not es_cucaracha or caso.atascos >= ATASCOS_PARA_FOTO:
-            caso.foto_pedida = True
-            self.texto_garantizado = catalogo.OFERTA_FOTO
-            base["instrucciones"] = "Ya se le pidió una foto al lead. No agregues nada."
+            base["instrucciones"] = "Ya se le avisó al lead y se le pasó a una persona."
             return base
         caso.tarjetas += 1
         caso.turno_tarjeta = caso.turno
@@ -882,6 +892,20 @@ class RuntimeDePlagas(ToolRuntime):
                     "No digas ninguna cifra todavía." + aviso
                 ),
             }
+        if caso.ambas:
+            # Alemana y americana a la vez: el precio de las dos juntas no está
+            # en el catálogo, lo define una persona. Ya se tienen los datos del
+            # inmueble (la alemana los pide), así que se pasa completo.
+            await self._ficha({"datos_cotizacion": datos})
+            await self._escalar(
+                "modelo",
+                f"Cotización manual — cucaracha alemana y americana (tiene las dos). "
+                f"Datos: {datos or 'sin datos'}",
+                f"Con las dos cucarachas a la vez, el precio lo define "
+                f"{catalogo.NEGOCIO['dueno']} según tu caso. Ya le pasé tus datos para "
+                "que te lo dé por aquí 🙌",
+            )
+            return {"ok": True, "estado": "lo_cotiza_el_dueno", "instrucciones": "Ya se le avisó al lead y se le pasó a una persona."}
         if cot.estado == "requiere_dueno":
             await self._ficha({"datos_cotizacion": datos})
             await self._escalar(
@@ -1322,6 +1346,28 @@ _NUMEROS = {
     "cincuenta": 50, "sesenta": 60, "setenta": 70, "ochenta": 80, "noventa": 90,
     "cien": 100, "doscientos": 200, "trescientos": 300,
 }
+
+
+def bloque_de_dos_cucarachas() -> str:
+    """Lo que se le dice a quien tiene cucaracha alemana Y americana: solo catálogo."""
+    alemana = catalogo.PLAGAS["cucaracha_alemana"]
+    americana = catalogo.PLAGAS["cucaracha_americana"]
+
+    def _visitas(info: dict[str, Any]) -> str:
+        return info["visitas"][:1].upper() + info["visitas"][1:]
+
+    lineas = [
+        "Por lo que me cuentas tienes las dos 🪳: la cucaracha alemana (la chica) y "
+        "la americana (la grande).",
+    ]
+    if alemana.get("tranquilidad"):
+        lineas.append(f"💚 {alemana['tranquilidad']}")
+    lineas += [
+        f"🛠️ Alemana: {alemana.get('resumen') or alemana['procedimiento']}\n🗓️ {_visitas(alemana)}.",
+        f"🛠️ Americana: {americana.get('resumen') or americana['procedimiento']}\n🗓️ {_visitas(americana)}.",
+        catalogo.PREGUNTA_URGENCIA,
+    ]
+    return "\n\n".join(lineas)
 
 
 def bloque_de_tratamiento(plaga: str, texto_del_lead: str = "") -> str:
