@@ -93,14 +93,18 @@ def test_una_senal_que_el_lead_no_escribio_se_rechaza():
 
 
 def test_rasgos_de_las_dos_especies_no_confirman_ninguna():
-    # Chica (alemana) + coladera (americana): se atasca → tarjeta comparativa.
+    # Chica (alemana) + coladera (americana): no confirma ninguna. Primero se sigue
+    # con el comportamiento (no con foto); solo si tampoco cierra, la tarjeta.
+    senales = [_senal("tamano_chica", "chiquitas"), _senal("ubicacion_drenaje", "salen de la coladera")]
+    mensajes = ["son chiquitas y salen de la coladera"]
+    d = diagnostico.evaluar("cucaracha", senales, mensajes_lead=mensajes)
+    assert d.estado == "faltan_senales" and not d.atasco
+    assert d.senal_preguntada == "comportamiento_1"
     d = diagnostico.evaluar(
-        "cucaracha",
-        [_senal("tamano_chica", "chiquitas"), _senal("ubicacion_drenaje", "salen de la coladera")],
-        mensajes_lead=["son chiquitas y salen de la coladera"],
+        "cucaracha", senales, mensajes_lead=mensajes,
+        preguntadas=["comportamiento_1", "comportamiento_2"],
     )
-    assert d.estado == "faltan_senales"
-    assert d.atasco
+    assert d.estado == "faltan_senales" and d.atasco
 
 
 def test_el_bano_no_distingue_la_especie():

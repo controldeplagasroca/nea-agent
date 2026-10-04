@@ -147,8 +147,8 @@ async def test_el_mensaje_de_confirmacion_conserva_lo_que_dijo_el_lead():
         "Nosotros te avisamos cuando tengamos disponibilidad.",
         "Perfecto, te confirmo en breve el horario.",
         "Déjame checarlo con el equipo.",
-        "Permíteme un momento mientras te comunico con el Ing. Leopoldo.",
-        "El Ing. Leopoldo se comunicará contigo.",
+        "Permíteme un momento mientras te comunico con un técnico especializado.",
+        "Un técnico especializado se comunicará contigo.",
         "Te mando la cotización. ¿Algo más en lo que te pueda ayudar?",
     ],
 )
@@ -171,11 +171,11 @@ def test_prometer_para_despues_sin_pasar_la_conversacion_es_promesa_vacia(texto)
     [
         "Te aviso de una vez: por ahora no damos servicio en Ecatepec 😔",
         "Te aviso con gusto: sí damos servicio en la Narvarte ✅",
-        "Si prefieres, te comunico con el Ing. Leopoldo. ¿Quieres?",
-        "Si hubo un problema con algún servicio, dímelo y con gusto te comunico con el Ing. Leopoldo.",
+        "Si prefieres, te comunico con un técnico especializado. ¿Quieres?",
+        "Si hubo un problema con algún servicio, dímelo y con gusto te comunico con un técnico especializado.",
         "¿Quieres que te pase el costo del servicio?",
         "Te paso el precio en cuanto me digas el inmueble. ¿Es casa o departamento?",
-        "En cuanto cerremos tu cita, te paso con el Ing. Leopoldo para que la confirme.",
+        "En cuanto cerremos tu cita, te paso con un técnico especializado para que la confirme.",
         "Claro, cuando gustes me avisas 🙌",
     ],
 )
@@ -210,10 +210,10 @@ async def test_te_comunico_con_el_dueno_solo_sale_si_el_pase_ocurre():
     await _hasta_plaga_confirmada(llm, ctx)
     llm.replies += [
         _llama("handoff", reason="modelo", nota="Pregunta por el contrato anual para su edificio"),
-        _dice("Permíteme un momento mientras te comunico con el Ing. Leopoldo 🙌"),
+        _dice("Permíteme un momento mientras te comunico con un técnico especializado 🙌"),
     ]
     texto = await _turno(ctx, "oigan y manejan contratos anuales para todo el edificio?", 2)
-    assert texto == "Permíteme un momento mientras te comunico con el Ing. Leopoldo 🙌"
+    assert texto == "Permíteme un momento mientras te comunico con un técnico especializado 🙌"
     assert ctx.crm.handoffs == ["modelo"]
 
 
@@ -271,10 +271,10 @@ def test_lo_aprobado_y_los_plazos_del_tratamiento_no_se_confunden(texto):
     [
         ("Claro, el servicio incluye garantía de 6 meses.", "cucaracha_alemana", True),
         ("Sí, todos nuestros trabajos están garantizados.", "hormiga", True),
-        ("La garantía la define el Ing. Leopoldo; si quieres te comunico con él.", "hormiga", False),
+        ("La garantía la define un técnico especializado; si quieres te comunico con él.", "hormiga", False),
         ("Ese punto no lo manejo por aquí: no te puedo prometer una garantía.", "hormiga", False),
         ("¿Preguntas por la garantía de un servicio que ya te hicimos?", None, False),
-        ("Permíteme un momento mientras te comunico con el Ing. Leopoldo para que revise tu garantía.", None, False),
+        ("Permíteme un momento mientras te comunico con un técnico especializado para que revise tu garantía.", None, False),
         ("Incluye garantía de 3 años.", "termita_madera_seca", False),  # esa sí es del catálogo
         ("Cuento todos los colchones porque no se puede dar garantía de uno que no se trató.", "chinches", False),
     ],
@@ -324,7 +324,7 @@ async def test_la_cotizacion_manual_le_llega_al_dueno_con_los_datos():
 
 
 async def test_sin_ventana_abierta_el_aviso_no_sale_y_el_turno_no_se_entera():
-    llm = FakeLLM([_llama("handoff", reason="cliente"), _dice("Permíteme un momento mientras te comunico con el Ing. Leopoldo.")])
+    llm = FakeLLM([_llama("handoff", reason="cliente"), _dice("Permíteme un momento mientras te comunico con un técnico especializado.")])
     ctx = _ctx(llm, crm={"dueno": "525599990000", "ventana_dueno": False}, aviso_dueno_wa=DUENO)
     texto = await _turno(ctx, "quiero hablar con una persona por favor", 1)
     assert texto is not None and ctx.crm.handoffs == ["cliente"]
@@ -332,7 +332,7 @@ async def test_sin_ventana_abierta_el_aviso_no_sale_y_el_turno_no_se_entera():
 
 
 async def test_sin_aviso_configurado_no_se_le_escribe_a_nadie_mas():
-    llm = FakeLLM([_llama("handoff", reason="cliente"), _dice("Permíteme un momento mientras te comunico con el Ing. Leopoldo.")])
+    llm = FakeLLM([_llama("handoff", reason="cliente"), _dice("Permíteme un momento mientras te comunico con un técnico especializado.")])
     ctx = _ctx(llm, crm={"dueno": "525599990000"})
     await _turno(ctx, "quiero hablar con una persona por favor", 1)
     assert ctx.crm.handoffs == ["cliente"] and ctx.crm.avisos == []
@@ -531,7 +531,8 @@ def test_ni_chicas_ni_grandes_mas_cocina_no_confirma_nada():
             {"senal": "tamano_grande", "cita": "se me hacen normales, ni chicas ni grandes"},
             {"senal": "ubicacion_cocina", "cita": "por todo el depa, cocina"},
         ],
-        preguntadas=["tamano", "ubicacion"], mensajes_lead=mensajes,
+        preguntadas=["tamano", "ubicacion", "comportamiento_1", "comportamiento_2"],
+        mensajes_lead=mensajes,
     )
     assert d.estado == "faltan_senales" and d.atasco  # toca la tarjeta comparativa
     assert list(d.senales) == ["ubicacion_cocina"]
@@ -566,10 +567,10 @@ async def test_si_reincide_se_le_quita_la_frase_mala_y_lo_demas_si_sale():
     llm.replies += [_llama("cotizar", tipo_inmueble="casa"), _dice("…")]
     await _turno(ctx, "cuánto cuesta? es una casa", 2)
     llm.replies += [
-        _dice("Sí, serían $2,400 en total por las dos visitas. La garantía la define el Ing. Leopoldo."),
+        _dice("Sí, serían $2,400 en total por las dos visitas. La garantía la define un técnico especializado."),
         _dice(
             "Entiendo que $2,400 suena fuerte. Son $1,200 MXN por visita y se liquida al "
-            "término de cada una. Lo de la garantía lo define el Ing. Leopoldo: si quieres, "
+            "término de cada una. Lo de la garantía lo define un técnico especializado: si quieres, "
             "te comunico con él."
         ),
     ]
@@ -577,7 +578,7 @@ async def test_si_reincide_se_le_quita_la_frase_mala_y_lo_demas_si_sale():
     assert texto is not None
     assert "2,400" not in texto
     assert "$1,200 MXN por visita" in texto
-    assert "garantía lo define el Ing. Leopoldo" in texto  # no se perdió la respuesta
+    assert "garantía lo define un técnico especializado" in texto  # no se perdió la respuesta
 
 
 async def test_si_al_podar_no_queda_nada_util_va_el_respaldo():

@@ -259,6 +259,36 @@ def _frases(texto: str) -> list[str]:
     return [n for n in (normalizar(f) for f in _trozos(texto, r"[.!?;\n]+")) if n]
 
 
+# ------------------------------------------- nunca nombrar al dueño ---
+
+# «El dueño», «el jefe», «Leopoldo», «el ingeniero»: el cliente no debe saber quién
+# es ni cómo se llama. «Dueño de la casa/del depa» (del cliente) no cuenta.
+_DUENO = re.compile(
+    r"\bleopoldo\b|\bingeniero\b|\bing\.\s|\bel jefe\b|\bmi jefe\b|\bpropietari[oa]s? del negocio\b|"
+    r"\bduen[oa]\b(?!\s+(?:del|de la|de el|de los|de las|de tu|de su|de ese|de esa)\b)"
+)
+
+
+# Pedir foto: «¿me puedes mandar una foto?», «mándame una foto». «Gracias por la
+# foto que enviaste» (la mandó él) no cuenta.
+_PIDE_FOTO = re.compile(
+    r"\b(puedes|podrias|podria|quieres|te animas|manda(me)?|envia(me)?|pasa(me)?|"
+    r"comparte(me)?|toma|tomale|saca(le)?|adjunta)\b[^.?!]{0,35}\b(foto|fotos|fotografia|imagen|video)\b"
+)
+
+
+def pide_foto(texto: str) -> str:
+    """La frase con la que el texto le pide una foto al cliente, o ""."""
+    m = _PIDE_FOTO.search(normalizar(texto or ""))
+    return m.group(0).strip() if m else ""
+
+
+def menciona_al_dueno(texto: str) -> str:
+    """La frase que nombra al dueño (o su nombre) ante el cliente, o ""."""
+    m = _DUENO.search(normalizar(texto or ""))
+    return m.group(0).strip() if m else ""
+
+
 # ------------------------------------------------------- promesas vacías ---
 
 # Lo que el dueño contó de su bot anterior (audio del 1 de octubre): «dice "sí,
@@ -783,6 +813,25 @@ def revisar(
             "particular (embarazo, bebés, alergias, mascotas), que la indicación "
             "se la confirma el dueño, y ofrécele comunicarlo con él",
             detalle=", ".join(inventos),
+        ))
+    menciona = menciona_al_dueno(texto)
+    if menciona:
+        faltas.append(Falta(
+            "menciona_al_dueno", True,
+            f"nombraste al dueño o a su nombre («{menciona}»). Al cliente NUNCA se le "
+            "dice «el dueño», «el jefe», «el ingeniero» ni «Leopoldo»: cuando haya "
+            "que pasarlo con alguien, es «un técnico especializado»",
+            detalle=menciona,
+        ))
+    foto = pide_foto(texto)
+    if foto:
+        faltas.append(Falta(
+            "pide_foto", True,
+            f"le pediste una foto o imagen («{foto}»). No se piden fotos: muchas salen "
+            "borrosas y ni un experto puede identificar con ellas. Sigue identificando "
+            "con la pregunta de comportamiento o lugar del PASO ACTUAL (si el cliente "
+            "manda una foto por su cuenta, sí la usas)",
+            detalle=foto,
         ))
     if _INGLES.search(texto):
         faltas.append(Falta(
