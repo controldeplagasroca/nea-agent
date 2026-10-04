@@ -126,11 +126,16 @@ def paso_actual(caso: Caso, *, agenda: bool = True) -> Paso:
     if caso.cita is not None and caso.cita.get("estado") == "confirmada":
         return Paso(
             "visita_confirmada",
-            f"La visita está CONFIRMADA ({caso.cita.get('label')}) y el cliente ya "
-            "lo sabe. Si pregunta, díselo así y contesta sus dudas del servicio. "
-            f"Si quiere moverla o cancelarla: «permíteme un momento mientras te "
-            f"comunico con {dueno}» y llama handoff con motivo \"cliente\".",
-            "Volver a cotizar, ofrecer otros horarios o agendar otra visita.",
+            f"La visita está AGENDADA y CONFIRMADA ({caso.cita.get('label')}) y el "
+            "cliente ya lo sabe. Si pregunta, díselo así y contesta sus dudas del "
+            "servicio; cuando se designe a su técnico se le enviará un mensaje por aquí. "
+            "Si quiere CANCELAR: con mucha amabilidad pregúntale por qué (una sola "
+            "pregunta) y ofrécele reagendar para otro día. Si dice que va a verificar "
+            "su fecha, respétalo («sin problema, aquí estaré») y no insistas. Si ya "
+            f"tiene una fecha nueva: «permíteme un momento mientras te comunico con "
+            f"{dueno}» y llama handoff con motivo \"cliente\".",
+            "Decir «solicitud», «pendiente» o que alguien tiene que autorizarla. "
+            "Volver a cotizar, ofrecer otros horarios por tu cuenta o agendar otra visita.",
         )
 
     if caso.cita is not None:
@@ -280,8 +285,8 @@ def paso_actual(caso: Caso, *, agenda: bool = True) -> Paso:
         "escrita: agradécelo y pídela igual. No le preguntes al lead su alcaldía "
         "si ya la escribió, ni la deduzcas tú."
         + restriccion,
-        "Inventar un horario. Decir que la cita «ya quedó agendada»: queda "
-        f"SOLICITADA y la confirma {dueno}. Preguntar otra vez lo que ya aceptó.",
+        "Inventar un horario. Decir tú que la cita «ya quedó agendada» o «confirmada»: "
+        "eso lo dice el sistema en cuanto la registra. Preguntar otra vez lo que ya aceptó.",
     )
 
 
@@ -314,16 +319,18 @@ def expediente(caso: Caso, *, agenda: bool = True) -> str:
         )
         if info.get("contencion"):
             lineas.append(f"- Indicación para el lead: {info['contencion']}")
-        if info.get("precaucion"):
-            lineas.append(f"- Precaución (solo si describe esa araña): {info['precaucion']}")
+        if info.get("tranquilidad_peligrosa"):
+            lineas.append(
+                f"- Si nombra una araña peligrosa (violinista, viuda negra): {info['tranquilidad_peligrosa']}"
+            )
             # En la autoprueba, a «¿es peligrosa? ¿qué me pasa si me pica?» el
             # modelo callaba (no puede diagnosticar) y, a la segunda, pasaba la
             # conversación al dueño y se perdía la cotización.
             lineas.append(
-                "- Si pregunta si es peligrosa o qué pasa si pica: NO es motivo para "
-                "pasar la conversación. Contéstale en una frase, sin alarmar: que "
-                "por aquí no puedes dar diagnósticos de picaduras ni de salud, y "
-                "repite la precaución de arriba. Luego sigue con el paso actual."
+                "- Si pregunta si es violinista o viuda negra, o qué pasa si pica: NO es "
+                "motivo para pasar la conversación ni puedes identificarla ni dar "
+                "diagnósticos de picaduras o de salud. Contéstale con la tranquilidad de "
+                "arriba, con tus palabras y sin alarmar, y luego sigue con el paso actual."
             )
     elif caso.candidata or caso.senales:
         senales = "; ".join(f"«{c}»" for c in caso.senales.values()) or "ninguna todavía"
@@ -348,7 +355,10 @@ def expediente(caso: Caso, *, agenda: bool = True) -> str:
     if any(caso.direccion.values()):
         lineas.append(f"- Dirección que lleva dada: {caso.direccion_texto()}.")
     if caso.cita:
-        lineas.append(f"- Visita SOLICITADA (pendiente de confirmar): {caso.cita.get('label')}.")
+        if caso.cita.get("estado") == "confirmada":
+            lineas.append(f"- Visita AGENDADA y confirmada: {caso.cita.get('label')}.")
+        else:
+            lineas.append(f"- Visita SOLICITADA (pendiente de confirmar): {caso.cita.get('label')}.")
 
     paso = paso_actual(caso, agenda=agenda)
     lineas.append("")

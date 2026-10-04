@@ -21,6 +21,7 @@ modelo llamara `update_ficha`, 166 de 167 contactos quedaron con la ficha vacía
 """
 from __future__ import annotations
 
+import difflib
 import logging
 import re
 from datetime import date, datetime, timedelta
@@ -28,15 +29,23 @@ from typing import Any
 
 from app import hostility
 
-from app.approvals import enviar_solicitud_aprobacion, next_reminder
+from app.approvals import construir_description_evento, enviar_solicitud_aprobacion, next_reminder
 from app.crm import CrmError
-from app.gcal import SERVICE_RULES, SERVICIO_DE_PLAGA
+from app.gcal import SERVICE_RULES, SERVICIO_DE_PLAGA, CalendarError, CalendarSlotTaken
 from app.horarios import _coincide, analizar_horas
 from app.plagas import candados, catalogo, cobertura, diagnostico, precios
+from app.plagas.aviso import avisar_cita_agendada
 from app.plagas.caso import DIRECCION_CAMPOS, DIRECCION_NOMBRES, Caso
+from app.plagas.fechas import fecha_pedida
 from app.plagas.texto import normalizar
 from app.state import OfferedSlot
-from app.tools import TOOL_SCHEMAS, ToolRuntime, _zona_del_negocio
+from app.tools import (
+    TOOL_SCHEMAS,
+    ToolRuntime,
+    _slots_for_llm,
+    _slots_from_payload,
+    _zona_del_negocio,
+)
 
 logger = logging.getLogger("nea.plagas")
 
@@ -1038,8 +1047,15 @@ class RuntimeDePlagas(ToolRuntime):
         dia = caso.cobertura.get("dia_restringido")
         # En una zona de un solo día (Toluca, Lerma) el día lo manda la regla de
         # zona, no el dueño: pedir otro día se contesta abajo con «solo ese día».
-        if dia is None and await self._propone_su_horario(args):
+        con_calendario = self._ctx.calendar is not None
+        if dia is None and not con_calendario and await self._propone_su_horario(args):
             return await self._pasar_horario_al_dueno()
+        if dia is None and con_calendario and not args.get("fecha"):
+            # Con calendario propio la disponibilidad se consulta, no se supone ni
+            # se manda a verificar: «¿mañana a las 10?» se contesta mirando ESE día.
+            pedida = fecha_pedida(self._texto_lead, datetime.now(_zona_del_negocio(self._ctx)).date())
+            if pedida:
+                args = {**args, "fecha": pedida}
         if dia is None:
             res = await super()._propose_slots(args)
         else:
@@ -1078,9 +1094,14 @@ class RuntimeDePlagas(ToolRuntime):
         self, args: dict[str, Any], accion: str
     ) -> tuple[OfferedSlot | None, dict[str, Any] | None]:
         chosen, error = await super()._resolve_offered(args, accion)
-        if error is not None and error.get("error") == "hora_no_ofrecida":
+        if (
+            error is not None
+            and error.get("error") == "hora_no_ofrecida"
+            and self._ctx.calendar is None
+        ):
             # Pidió una hora que nadie le ofreció: no se le contradice ni se
-            # inventa; el dueño la verifica.
+            # inventa; el dueño la verifica. (Con calendario propio no hace falta:
+            # el error ya manda a consultar los horarios reales de ese día.)
             return None, await self._pasar_horario_al_dueno()
         return chosen, error
 
@@ -1184,7 +1205,7 @@ class RuntimeDePlagas(ToolRuntime):
         n = precios._numero(valor)
         if n is None:
             return False
-        if n == 0 and re.search(r"\bningun|\bno (tengo|hay|tenemos)\b|\bcero\b|\bninguno\b", plano):
+        if n == 0 and _dice_cero(plano):
             return True
         entero = int(n) if float(n).is_integer() else None
         candidatos = {f"{n:g}"} | ({str(entero)} if entero is not None else set())
@@ -1245,12 +1266,107 @@ class RuntimeDePlagas(ToolRuntime):
             caso.cita["folio"] = pending.id
         await enviar_solicitud_aprobacion(ctx, pending)
 
-    async def _solicitar_visita(self, chosen: OfferedSlot) -> dict[str, Any]:
-        """Candado de negocio (sección 9.3): la visita queda PENDIENTE de aprobación.
+    def _confirma_de_inmediato(self) -> bool:
+        """¿La visita se agenda al instante, sin que nadie la apruebe?
 
-        No se toca el calendario real: la solicitud se anota en la ficha y la
-        conversación se le pasa al dueño, que es quien la confirma.
+        Sí con calendario propio y plaga con regla de agenda: el horario elegido
+        ya salió de la disponibilidad real, así que ES una confirmación. No en
+        zonas de un solo día (Toluca, Lerma): ahí el dueño decide cada vez.
         """
+        return (
+            self._ctx.calendar is not None
+            and SERVICIO_DE_PLAGA.get(self.caso.plaga or "") is not None
+            and self.caso.cobertura.get("dia_restringido") is None
+        )
+
+    async def _confirmar_visita(self, chosen: OfferedSlot) -> dict[str, Any] | None:
+        """Agenda YA en Google Calendar. Devuelve el resultado de la herramienta, o
+        None si el calendario falló (entonces se cae a la solicitud con aprobación)."""
+        ctx, caso = self._ctx, self.caso
+        servicio = SERVICIO_DE_PLAGA[caso.plaga or ""]
+        regla = SERVICE_RULES[servicio]
+        fin = chosen.end_utc or chosen.start_utc + timedelta(minutes=regla.duration_minutes)
+        precio = (caso.cotizacion or {}).get("precio")
+        descripcion = construir_description_evento(
+            texto_base="Agendado por Nea (confirmación inmediata).",
+            telefono_cliente=self._conv.wa_identity,
+            direccion=caso.direccion_texto(),
+            service_key=servicio,
+            costo=float(precio) if isinstance(precio, (int, float)) else 0.0,
+            crm_conversation_id=self._crm_conv_id,
+        )
+        try:
+            resultado = await ctx.calendar.create_booking(
+                chosen.start_utc, fin, f"Visita {regla.label}", descripcion, servicio
+            )
+        except CalendarSlotTaken as exc:
+            # Se ocupó entre que se lo ofrecimos y dio su dirección: alternativas reales.
+            frescos = _slots_from_payload(self._conv.id, exc.slots)
+            await ctx.store.replace_offered_slots(self._conv.id, frescos)
+            return {
+                "ok": False,
+                "error": "slot_taken",
+                "detalle": "ese horario se acaba de ocupar; discúlpate breve y ofrece estas alternativas",
+                "slots": _slots_for_llm(frescos),
+            }
+        except CalendarError as exc:
+            logger.warning("plagas: Google Calendar no agendó (%s) — queda como solicitud", exc)
+            return None
+
+        dia = re.sub(r"^(hoy|mañana)\s+", "", chosen.label)
+        await ctx.store.save_calendar_booking(
+            self._conv.id, resultado["event_id"], servicio, chosen.start_utc, fin
+        )
+        await ctx.store.clear_offered_slots(self._conv.id)
+        caso.cita = {
+            "label": dia,
+            "start_utc": chosen.start_utc.isoformat(),
+            "estado": "confirmada",
+            "event_id": resultado["event_id"],
+        }
+        self.booked = True
+        info = catalogo.PLAGAS[caso.plaga or ""]
+        await self._ficha({
+            "cita_confirmada": dia,
+            "calificado": True,
+            "resultado": "agendo",
+            "notas": (
+                f"VISITA AGENDADA: {dia} — {info.get('nombre', '')} — "
+                f"{caso.cotizacion['linea'] if caso.cotizacion else ''} — {caso.direccion_texto()}"
+            )[:480],
+        })
+        # Al dueño: aviso informativo (nada que aprobar). Mejor esfuerzo.
+        await avisar_cita_agendada(
+            ctx, identidad_lead=self._conv.wa_identity, nombre=self._nombre_lead,
+            caso=caso, etiqueta=chosen.label,
+        )
+        saludo = f"Listo, {self._nombre_lead}" if self._nombre_lead else "Listo"
+        cuando = f"para {chosen.label}" if dia != chosen.label else f"para el {chosen.label}"
+        partes = [
+            f"✅ {saludo}: tu visita quedó agendada {cuando}.",
+            f"📍 {caso.direccion_texto()}",
+            "👷 Cuando tengamos designado a tu técnico, te enviaremos un mensaje por aquí.",
+        ]
+        if info.get("contencion"):
+            partes.append(f"⚠️ {info['contencion']}")
+        self.texto_garantizado = "\n\n".join(partes)
+        return {
+            "ok": True,
+            "estado": "visita_confirmada",
+            "instrucciones": "La visita YA quedó agendada y se le avisó al lead. No agregues nada.",
+        }
+
+    async def _solicitar_visita(self, chosen: OfferedSlot) -> dict[str, Any]:
+        """Registra la visita. Con calendario propio se AGENDA al instante (ver
+        `_confirma_de_inmediato`); si no, queda PENDIENTE de aprobación.
+
+        Pendiente: no se toca el calendario real; la solicitud se anota en la
+        ficha y el dueño la confirma con «sí N».
+        """
+        if self._confirma_de_inmediato():
+            resultado = await self._confirmar_visita(chosen)
+            if resultado is not None:
+                return resultado
         caso = self.caso
         dueno = catalogo.NEGOCIO["dueno"]
         info = catalogo.PLAGAS[caso.plaga or ""] if caso.plaga else {}
@@ -1379,8 +1495,10 @@ def bloque_de_tratamiento(plaga: str, texto_del_lead: str = "") -> str:
         lineas.insert(0, f"💚 {info['tranquilidad']}")
     # La precaución de la araña va solo si el lead describió una peligrosa
     # (sección 4.3): decírsela a todo el que tiene arañas es alarmar de más.
-    if info.get("precaucion") and re.search(catalogo.ARANA_PELIGROSA, normalizar(texto_del_lead)):
-        lineas.append(f"⚠️ {info['precaucion']}")
+    if info.get("tranquilidad_peligrosa") and re.search(
+        catalogo.ARANA_PELIGROSA, normalizar(texto_del_lead)
+    ):
+        lineas.append(info["tranquilidad_peligrosa"])
     return "\n".join(lineas) + f"\n\n{catalogo.PREGUNTA_URGENCIA}"
 
 
@@ -1389,6 +1507,26 @@ def _alias(texto: str) -> str | None:
     plano = normalizar(texto)
     # El catálogo de alias va de lo específico a lo general: gana el primero.
     return next((clave for patron, clave in catalogo.ALIAS if re.search(patron, plano)), None)
+
+
+_CERO_RE = re.compile(r"\bno (tengo|hay|tenemos|cuento|tiene|tienen)\b|\bni (una|un)\b|\bsin ningun")
+_CERO_PALABRAS = ("ninguna", "ninguno", "ningun", "cero", "nada")
+
+
+def _dice_cero(plano: str) -> bool:
+    """¿El texto dice «ninguna», «no tengo», «cero»…, aunque tenga una errata?
+
+    Caso real (4 oct): el cliente escribió «niguna silla secretarial» y el bot le
+    volvió a preguntar cuántas había. Una errata no es un «no contesté».
+    """
+    if _CERO_RE.search(plano):
+        return True
+    for palabra in re.findall(r"[a-z]+", plano):
+        if palabra in _CERO_PALABRAS:
+            return True
+        if len(palabra) >= 5 and difflib.get_close_matches(palabra, ("ninguna", "ninguno"), n=1, cutoff=0.8):
+            return True
+    return False
 
 
 def _ultima_plaga_nombrada(texto: str) -> str | None:

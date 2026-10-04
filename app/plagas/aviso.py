@@ -125,6 +125,32 @@ async def _enviar_al_dueno(ctx: Any, destino: str, texto: str) -> bool:
     return True
 
 
+async def avisar_cita_agendada(
+    ctx: Any, *, identidad_lead: str, nombre: str, caso: Caso, etiqueta: str
+) -> bool:
+    """Aviso INFORMATIVO al dueño de una visita que Nea agendó sola: nada que aprobar.
+
+    Falta designar técnico; el evento ya está en Google Calendar. Mejor esfuerzo:
+    si no sale (ventana de 24 h cerrada), la cita sigue agendada de todos modos.
+    """
+    destino = ctx.settings.aviso_dueno_identity or ctx.settings.owner_identity
+    cliente = canonical_identity(identidad_lead)
+    if not destino or cliente == destino:
+        return False
+    quien = " · ".join(p for p in (nombre.strip(), cliente if cliente.isdigit() else "") if p) or "un cliente"
+    info = catalogo.PLAGAS.get(caso.plaga or "") or {}
+    lineas = ["📅 *Cita agendada* (ya está en el calendario)", f"👤 {quien}"]
+    if info:
+        lineas.append(f"{info.get('emoji', '🐛')} {info.get('nombre', '')}")
+    lineas.append(f"🗓️ {etiqueta}")
+    if any(caso.direccion.values()):
+        lineas.append(f"📍 {caso.direccion_texto()}")
+    if caso.cotizacion:
+        lineas.append(f"💵 {caso.cotizacion.get('linea')}")
+    lineas.append("👷 Falta designar técnico: al cliente ya se le dijo que se le avisa por aquí.")
+    return await _enviar_al_dueno(ctx, destino, "\n".join(lineas))
+
+
 # Cada cuánto, como mucho, se le repite al dueño que Nea sigue callada con el
 # MISMO cliente (si el cliente escribe cinco veces, un solo aviso).
 PARO_REPETIR_MINUTOS = 30
