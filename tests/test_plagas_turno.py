@@ -370,6 +370,33 @@ async def test_chinches_se_confirman_con_dos_indicios_y_se_cotizan_sin_dar_vuelt
     assert ctx.crm.handoffs == []  # ya no se le pasa al dueño: se cotiza solo
 
 
+async def test_chinches_el_modelo_no_etiqueta_y_aun_asi_se_confirma_y_se_sigue_a_la_cotizacion():
+    """Caso real (3 oct 21:26): el cliente contó manchas y piquetes, el modelo no
+    etiquetó bien, el bot se fue a «ya envié tus datos al Ing.» sin avisar y no
+    cotizó. El servidor confirma por lo que el cliente escribió y la
+    conversación sigue: colchones → precio, sin pasarse al dueño."""
+    llm = FakeLLM()
+    ctx = _ctx(llm)
+    llm.replies += [
+        _llama("verificar_cobertura", zona="Escandón", codigo_postal="11800"),
+        _llama("identificar_plaga", plaga="chinches", senales=[]),
+        _dice("Sugiere que son chinches. Ya he enviado tus datos al Ing. Leopoldo, te dará el precio pronto."),
+    ]
+    texto = await _turno(
+        ctx, "tengo manchas en las sábanas y piquetes, Escandón 11800", 1
+    )
+    caso = await _caso(ctx)
+    assert caso["plaga"] == "chinches"
+    assert texto is not None and "Vapor y calor" in texto  # el tratamiento lo pone el servidor
+    assert "enviado tus datos" not in texto and "te dará" not in texto.lower()
+    assert ctx.crm.handoffs == []
+
+    llm.replies += [_llama("cotizar", colchones=4, sillones=3, sillas_comedor=6), _dice("x")]
+    texto = await _turno(ctx, "cuánto cuesta? tengo 4 colchones, 3 sillones y 6 sillas", 2)
+    assert texto is not None and "$2,000" in texto and "por visita" in texto
+    assert ctx.crm.handoffs == []
+
+
 async def test_cliente_recurrente_no_se_cotiza():
     llm = FakeLLM([
         _llama("cotizar", tipo_inmueble="casa"),

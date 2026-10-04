@@ -102,3 +102,57 @@ def test_nunca_se_pregunta_por_viajes_ni_por_si_dice_que_son_chinches():
             break
         assert d.senal_preguntada not in ("viaje_o_mueble", "dice_chinches")
         preguntadas.append(d.senal_preguntada)
+
+
+# ------------------- caso real 3 oct, 21:26-21:32: identificó pero no cotizó ---
+
+
+@pytest.mark.parametrize("mensajes", [
+    ["Tengo manchas en las sábanas y piquetes"],
+    ["he visto manchas en las sábanas", "no se en las costuras pero tengo piquetes"],
+    ["tengo chinches", "vi animalitos detrás de la cabecera"],
+    ["tengo chinches y manchas de sangre en la cama"],
+])
+def test_el_servidor_reconoce_los_indicios_aunque_el_modelo_no_los_etiquete(mensajes):
+    d = _evaluar([], mensajes)  # el modelo no mandó ninguna señal
+    assert d.estado == "confirmada" and d.plaga == "chinches"
+
+
+@pytest.mark.parametrize("mensajes", [
+    ["no he visto chinches"],
+    ["no tengo piquetes ni manchas en las sábanas"],
+    ["tengo un solo piquete"],
+    ["hola, ¿cuánto cuesta?"],
+])
+def test_un_indicio_negado_o_ausente_no_confirma(mensajes):
+    assert _evaluar([], mensajes).estado != "confirmada"
+
+
+def test_prometer_que_el_dueno_dara_el_precio_sin_pasarlo_es_una_promesa_vacia():
+    from app.plagas import candados
+
+    texto = (
+        "Lo que me cuentas sugiere que es chinche de cama. 🛏️\n\nEl tratamiento incluye dos "
+        "visitas, y ya he enviado tus datos al Ing. Leopoldo. Te dará el precio exacto pronto. "
+        "¿Hay algo más que te gustaría preguntar mientras tanto?"
+    )
+    assert candados.promesa_vacia(texto) != ""
+
+
+@pytest.mark.parametrize("texto", [
+    "Ya le pasé tus datos al Ing. Leopoldo.",
+    "Mi equipo ya recibió tu solicitud y te confirmará la visita.",
+    "El Ing. Leopoldo te escribirá en breve.",
+])
+def test_dar_por_hecho_un_pase_que_no_ocurrio_se_detecta(texto):
+    from app.plagas import candados
+
+    assert candados.promesa_vacia(texto) != ""
+
+
+def test_una_pregunta_normal_de_cotizacion_no_es_promesa():
+    from app.plagas import candados
+
+    assert candados.promesa_vacia(
+        "¿Cuántos colchones, sillones y sillas de comedor tapizadas hay en total en toda la casa?"
+    ) == ""

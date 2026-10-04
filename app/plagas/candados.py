@@ -283,7 +283,15 @@ _PROMESA_DE_CONTACTO = re.compile(
     r"\bnos (comunicamos|comunicaremos|ponemos en contacto|pondremos en contacto)\b|"
     r"\bse (comunicara|comunica|pondra en contacto|pone en contacto) contigo\b|"
     r"\bte (comunico|paso|canalizo|transfiero) con\b|"
-    r"\bcuando (tengamos|haya|tenga) (disponibilidad|espacio|lugar)\b"
+    r"\bcuando (tengamos|haya|tenga) (disponibilidad|espacio|lugar)\b|"
+    # Dar por hecho un pase que no ocurrió («ya he enviado tus datos al Ing.»,
+    # «ya le pasé tu solicitud») y prometer lo que hará el dueño («te dará el
+    # precio exacto pronto»). Caso real del 3 oct: el bot dijo eso y nunca avisó.
+    r"\b(ya )?(le |se los |se lo )?(he |hemos )?(enviado|pasado|mandado|compartido|enviamos|"
+    r"pasamos|mandamos|compartimos|pase|mande|envie|comparti) (tus|los|sus|tu|la) "
+    r"(datos|solicitud|informacion|conversacion|cotizacion)\b|"
+    r"\bte (dara|dira|confirmara|escribira|contactara|llamara|enviara|mandara|pasara|"
+    r"respondera|atendera)\b"
 )
 _PROMESA_DIFERIDA = re.compile(
     r"\bte (la|lo|las|los) (mando|envio|mandamos|enviamos|hago llegar|comparto|paso)\b|"
