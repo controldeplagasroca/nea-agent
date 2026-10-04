@@ -15,11 +15,13 @@ Nea se comporta como antes de este cambio (usa la agenda del CRM).
 ## Cómo fluye una visita
 
 1. El cliente acepta la cotización y elige un horario de los que salen del calendario.
-2. Nea registra la solicitud (ficha + pase al dueño) **y** crea una solicitud con folio.
+2. Nea registra la solicitud con folio y se la manda al dueño. **La IA de esa conversación sigue encendida** (sin folio, es decir sin calendario o sin dueño que apruebe, la conversación se pasa al dueño y la IA se apaga).
+   Al cliente se le dice: «recibí tu solicitud… ⏳ Todavía no está confirmada».
 3. El dueño recibe «Cita #N por aprobar» en su WhatsApp. Responde `sí N` o `no N`.
    - Cualquier otra cosa **no** aprueba: la solicitud sigue pendiente.
    - **Aprobada:** se crea el evento en Google Calendar (con costo, dirección y
-     teléfono en la descripción, para ROCA Ops) y se le avisa al cliente.
+     teléfono en la descripción, para ROCA Ops), se le avisa al cliente («¡Confirmado! …»,
+     con la fecha sin «mañana»/«hoy») y el expediente pasa a «visita confirmada».
    - **Rechazada:** se le avisa al cliente con horarios alternativos reales.
 4. «Recordatorios» aquí son los del **dueño**: mientras haya una solicitud sin
    resolver, el worker la revisa cada `BOOKING_REMINDER_MINUTES` (reenvía solo si

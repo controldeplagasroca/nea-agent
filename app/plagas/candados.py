@@ -436,6 +436,12 @@ _REPREGUNTA_CUCARACHA = re.compile(
 )
 
 
+_REPREGUNTA_CHINCHES = re.compile(
+    r"\b(piquetes?|picaduras?|ronchas?|manchas?|manchitas?|sabanas?|puntos? negros?|"
+    r"puntitos?|cabecera|costuras?|viaje|mueble usado)\b"
+)
+
+
 def _preguntas_de_identificacion(plaga: str) -> list[str]:
     if plaga.startswith("cucaracha"):
         return [catalogo.PREGUNTA_CUCARACHA_TAMANO, catalogo.PREGUNTA_CUCARACHA_UBICACION]
@@ -451,6 +457,11 @@ def repregunta_identificacion(texto: str, plaga: str | None) -> str:
     for cuerpo in _PREGUNTA.findall(texto or ""):
         plano = normalizar(cuerpo)
         if plaga.startswith("cucaracha") and _REPREGUNTA_CUCARACHA.search(plano):
+            return cuerpo.strip()
+        # Chinches ya confirmadas: preguntar por piquetes, manchas o puntos negros
+        # es volver a lo que el cliente ya contó («¿en dónde has visto los piquetes
+        # y las manchas?» tras decirlo en su primer mensaje).
+        if plaga == "chinches" and _REPREGUNTA_CHINCHES.search(plano):
             return cuerpo.strip()
         dichas = set(palabras(cuerpo))
         for q in del_catalogo:

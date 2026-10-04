@@ -299,6 +299,7 @@ async def _resolver(ctx: AppContext, pending: PendingBooking, aprobado: bool) ->
     confirmación breve para el dueño."""
     if not aprobado:
         await ctx.store.resolve_pending_booking(pending.id, "rechazado")
+        await _actualizar_caso(ctx, pending, confirmada=False)
         await _notificar_lead(
             ctx, pending, await _texto_rechazo_con_alternativas(ctx, pending)
         )
@@ -351,6 +352,7 @@ async def _resolver(ctx: AppContext, pending: PendingBooking, aprobado: bool) ->
     )
     await ctx.store.clear_offered_slots(pending.conversation_id)
     await ctx.store.resolve_pending_booking(pending.id, "aprobado")
+    await _actualizar_caso(ctx, pending, confirmada=True)
     try:
         await ctx.crm.put_ficha(
             pending.crm_conversation_id,
@@ -358,12 +360,52 @@ async def _resolver(ctx: AppContext, pending: PendingBooking, aprobado: bool) ->
         )
     except CrmError as exc:
         logger.warning("approvals: no pude actualizar ficha tras aprobar #%s: %s", pending.id, exc)
+    # Sin «hoy»/«mañana»: el dueño puede aprobar días después de la solicitud.
     await _notificar_lead(
         ctx,
         pending,
-        f"¡Confirmado! Te esperamos el {pending.label} en {pending.direccion} ✅",
+        f"¡Confirmado! ✅ Te esperamos el {_sin_relativo(pending.label)} en {pending.direccion}.",
     )
     return f"Listo, cita #{pending.id} confirmada y avisado al cliente ✅"
+
+
+def _sin_relativo(etiqueta: str) -> str:
+    """«mañana lunes 5 de octubre, 11:00» → «lunes 5 de octubre, 11:00»."""
+    return re.sub(r"^(hoy|mañana)\s+", "", etiqueta.strip())
+
+
+async def _actualizar_caso(ctx: AppContext, pending: PendingBooking, *, confirmada: bool) -> None:
+    """Refleja la decisión del dueño en el expediente de la conversación.
+
+    Si no, el bot sigue diciendo «tu solicitud está pendiente» después de la
+    confirmación, o se queda sin poder ofrecer otro horario tras un rechazo.
+    Best-effort: la decisión ya está tomada y avisada.
+    """
+    try:
+        conv = await ctx.store.get_conversation(pending.conversation_id)
+        if conv is None:
+            return
+        caso = dict(conv.caso or {})
+        if confirmada:
+            cita = dict(caso.get("cita") or {})
+            cita["estado"] = "confirmada"
+            caso["cita"] = cita
+        else:
+            caso["cita"] = None
+            caso["escalado"] = ""
+        await ctx.store.update_conversation(pending.conversation_id, caso=caso)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("approvals: no pude actualizar el expediente de #%s: %s", pending.id, exc)
+
+
+# Frases del texto para el dueño que afirman que el cliente YA fue avisado; si el
+# aviso falló, no se pueden dejar (el dueño leería «avisado» y la nota de que no).
+_FRASES_DE_AVISO = (
+    " y avisado al cliente",
+    " — ya avisé al cliente",
+    " — avisé al cliente para que elija otro",
+    " avisé al cliente para que elija otro",
+)
 
 
 async def resolver_aprobacion(ctx: AppContext, pending: PendingBooking, aprobado: bool) -> str:
@@ -372,6 +414,8 @@ async def resolver_aprobacion(ctx: AppContext, pending: PendingBooking, aprobado
     _avisos_fallidos.set(0)
     texto = await _resolver(ctx, pending, aprobado)
     if _avisos_fallidos.get():
+        for frase in _FRASES_DE_AVISO:
+            texto = texto.replace(frase, "")
         texto += NOTA_LEAD_SIN_AVISO
     return texto
 

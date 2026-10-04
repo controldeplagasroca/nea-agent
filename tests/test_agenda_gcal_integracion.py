@@ -250,3 +250,93 @@ async def test_hora_que_si_coincide_se_agenda():
     elegido, error = await rt._resolve_offered({"start_utc": "2026-08-05T15:30:00Z"}, "book_session")
 
     assert error is None and elegido is not None
+
+
+# ------------------------------------------- cierre del ciclo de la cita ---
+
+
+async def _con_solicitud(ctx):
+    """Una solicitud con folio ya registrada, con su expediente en la conversación."""
+    rt = await _runtime(ctx)
+    rt.caso.cita = {"label": "mañana lunes 5 de octubre, 11:00", "estado": "pendiente_de_aprobacion"}
+    rt.caso.direccion = {"calle": "Matías Romero 1014", "colonia": "Valle Centro"}
+    slot = OfferedSlot(conversation_id=rt._conv.id, start_utc=INICIO, end_utc=None,
+                       label="mañana lunes 5 de octubre, 11:00")
+    with respx.mock:
+        respx.get(f"{CRM_URL}/api/bot/context").mock(return_value=httpx.Response(
+            200, json={"conversation": {"id": "dueno", "windowOpen": True}}))
+        respx.post(f"{CRM_URL}/api/bot/messages").mock(return_value=httpx.Response(200, json={}))
+        respx.put(f"{CRM_URL}/api/bot/ficha").mock(return_value=httpx.Response(200, json={}))
+        await rt._solicitar_visita(slot)
+    await ctx.store.update_conversation(rt._conv.id, caso=rt.caso.a_dict())
+    return rt
+
+
+async def test_con_folio_la_ia_sigue_encendida_para_poder_confirmarle_al_cliente():
+    ctx = _ctx()
+    rt = await _con_solicitud(ctx)
+    assert rt.handoff_reason is None  # no se pasa la conversación: el CRM apagaría la IA
+    assert rt.booked is True
+
+
+async def test_el_texto_al_cliente_no_se_contradice():
+    ctx = _ctx()
+    rt = await _con_solicitud(ctx)
+    texto = rt.texto_garantizado
+    assert "recibí tu solicitud" in texto and "Todavía no está confirmada" in texto
+    assert "Listo" not in texto and "✅" not in texto
+
+
+@respx.mock
+async def test_al_aprobar_el_cliente_recibe_la_confirmacion_y_el_expediente_cambia():
+    from app.approvals import resolver_aprobacion
+
+    ctx = _ctx()
+    rt = await _con_solicitud(ctx)
+    pend = (await ctx.store.list_pending_bookings_pendientes())[0]
+    envio = respx.post(f"{CRM_URL}/api/bot/messages").mock(return_value=httpx.Response(200, json={}))
+    respx.put(f"{CRM_URL}/api/bot/ficha").mock(return_value=httpx.Response(200, json={}))
+
+    texto = await resolver_aprobacion(ctx, pend, True)
+
+    cuerpo = envio.calls.last.request.content.decode()
+    assert "Confirmado" in cuerpo and "mañana" not in cuerpo  # sin «mañana»: se aprueba días después
+    assert "lunes 5 de octubre, 11:00" in cuerpo
+    assert "avisado al cliente" in texto and "No pude" not in texto
+    conv = await ctx.store.get_conversation(rt._conv.id)
+    assert conv.caso["cita"]["estado"] == "confirmada"
+    from app.plagas.caso import Caso, paso_actual
+    assert paso_actual(Caso.desde(conv.caso)).nombre == "visita_confirmada"
+
+
+@respx.mock
+async def test_al_rechazar_el_expediente_queda_libre_para_ofrecer_otro_horario():
+    from app.approvals import resolver_aprobacion
+
+    ctx = _ctx()
+    rt = await _con_solicitud(ctx)
+    pend = (await ctx.store.list_pending_bookings_pendientes())[0]
+    respx.post(f"{CRM_URL}/api/bot/messages").mock(return_value=httpx.Response(200, json={}))
+
+    await resolver_aprobacion(ctx, pend, False)
+
+    conv = await ctx.store.get_conversation(rt._conv.id)
+    assert conv.caso["cita"] is None and conv.caso["escalado"] == ""
+
+
+@respx.mock
+async def test_si_no_se_pudo_avisar_el_texto_al_dueno_no_dice_que_ya_se_aviso():
+    from app.approvals import resolver_aprobacion
+
+    ctx = _ctx()
+    await _con_solicitud(ctx)
+    pend = (await ctx.store.list_pending_bookings_pendientes())[0]
+    respx.post(f"{CRM_URL}/api/bot/messages").mock(
+        return_value=httpx.Response(409, json={"error": "ai_paused"})
+    )
+    respx.put(f"{CRM_URL}/api/bot/ficha").mock(return_value=httpx.Response(200, json={}))
+
+    texto = await resolver_aprobacion(ctx, pend, True)
+
+    assert "avisado al cliente" not in texto
+    assert "No pude avisarle al cliente" in texto

@@ -156,3 +156,21 @@ def test_una_pregunta_normal_de_cotizacion_no_es_promesa():
     assert candados.promesa_vacia(
         "¿Cuántos colchones, sillones y sillas de comedor tapizadas hay en total en toda la casa?"
     ) == ""
+
+
+def test_con_chinches_confirmadas_no_se_vuelve_a_preguntar_por_piquetes_ni_manchas():
+    from app.plagas import candados
+
+    for pregunta in (
+        "¿En dónde has visto los piquetes y las manchas — en tu cama, cabecera o algún otro mueble?",
+        "¿Has notado manchitas de sangre en las sábanas?",
+        "¿Hubo un viaje reciente?",
+    ):
+        assert candados.repregunta_identificacion(pregunta, "chinches") != "", pregunta
+    # Lo que sí toca preguntar no se confunde con identificación.
+    for pregunta in (
+        "¿Cuántos colchones, sillones, sillas de comedor tapizadas y sillas secretariales hay en total?",
+        "¿Te gustaría que agendemos tu primera visita?",
+        "¿Has notado si han aumentado estos días?",
+    ):
+        assert candados.repregunta_identificacion(pregunta, "chinches") == "", pregunta

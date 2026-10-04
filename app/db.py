@@ -325,6 +325,12 @@ class PgStore(PgDispatchStore):
         assert row is not None
         return _conv_from_row(row)
 
+    async def get_conversation(self, conversation_id: int) -> Conversation | None:
+        row = await self.pool.fetchrow(
+            "SELECT * FROM bot_conversation WHERE id = $1", conversation_id
+        )
+        return _conv_from_row(row) if row is not None else None
+
     async def update_conversation(self, conversation_id: int, **fields: Any) -> None:
         unknown = set(fields) - _CONV_COLUMNS
         if unknown:
