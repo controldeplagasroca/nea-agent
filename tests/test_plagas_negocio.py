@@ -76,7 +76,7 @@ def test_un_solo_dato_nunca_confirma():
         "cucaracha", [_senal("tamano_chica", "son chiquitas")], mensajes_lead=LEAD
     )
     assert d.estado == "faltan_senales"
-    assert "cocina" in d.pregunta  # lo siguiente es preguntar la ubicación
+    assert "refrigerador" in d.pregunta  # lo siguiente es preguntar la ubicación
     assert not d.atasco
 
 

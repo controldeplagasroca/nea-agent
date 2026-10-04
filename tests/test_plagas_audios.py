@@ -108,8 +108,9 @@ def test_con_un_solo_dato_pregunta_el_otro_dando_las_dos_opciones():
         mensajes_lead=["son chiquitas"],
     )
     assert d.estado == "faltan_senales"
-    # La pregunta ya trae la orientación (cocina vs. coladeras): no es «¿dónde?» a secas.
-    assert "cocina" in d.pregunta and "coladeras" in d.pregunta
+    # La pregunta ya trae pistas concretas (detrás del refri… vs. coladeras): no es
+    # «¿dónde?» a secas ni «¿en la cocina?» para quien ya lo dijo.
+    assert "refrigerador" in d.pregunta and "coladeras" in d.pregunta
     assert d.pregunta.count("?") == 1
 
 

@@ -74,7 +74,7 @@ CUCARACHA_SENALES: dict[str, dict[str, Any]] = {
     "ubicacion_cocina": {
         "especie": "cucaracha_alemana", "tipo": "ubicacion",
         "texto": "en la cocina: detrás del microondas, la licuadora o el refrigerador, en gabinetes y alacena, cerca de la tarja",
-        "claves": ["cocin", "refri", "microond", "licuadora", "gabinet", "tarja", "estufa", "horno", "alacena", "fregadero", "lavatrastes", "trastes", "despensa"],
+        "claves": ["cocin", "refri", "microond", "licuadora", "gabinet", "tarja", "estufa", "horno", "alacena", "fregadero", "lavatrastes", "trastes", "despensa", "electrodomestic", "contacto"],
     },
     "ubicacion_drenaje": {
         "especie": "cucaracha_americana", "tipo": "ubicacion",
@@ -141,9 +141,12 @@ PREGUNTA_CUCARACHA_TAMANO = (
     "¿De qué tamaño son: chiquitas (1 a 2 cm, café claro) o grandes "
     "(4 a 5 cm, café rojizo oscuro)?"
 )
+# Pregunta con pistas concretas, no «¿en la cocina o en el drenaje?»: quien ya dijo
+# «de la cocina» no debe sentir que se le repite, y lo que contesta confirma.
 PREGUNTA_CUCARACHA_UBICACION = (
-    "¿En qué parte las ves más: en la cocina (detrás del refri, gabinetes, "
-    "tarja) o cerca de coladeras, drenajes o el patio?"
+    "¿Las has visto detrás del refrigerador o de otros electrodomésticos, en "
+    "gabinetes, contactos de luz o cerca de la tarja — o más bien cerca de "
+    "coladeras, drenajes o el patio?"
 )
 
 TARJETA_CUCARACHAS = (
@@ -174,12 +177,12 @@ PLAGAS: dict[str, dict[str, Any]] = {
             "suele entrar a casa sin que nos demos cuenta, y tiene solución."
         ),
         "visitas": "2 visitas (entre 8 y 10 días entre una y otra)",
-        "resumen": "Se aplica polvo fino focalizado en nidos y refugios (no es aspersión general): la 1ª visita elimina adultos y jóvenes y la 2ª rompe el ciclo de los huevecillos.",
+        "resumen": "No es una aspersión general: el técnico aplica un cebo en polvo fino en las zonas de refugio, que él ya sabe identificar. La 1ª visita elimina adultos y jóvenes y la 2ª rompe el ciclo de los huevecillos.",
         "procedimiento": (
-            "Tras una inspección se aplica polvo fino focalizado en nidos y "
-            "refugios (no es una aspersión general). La 1ª visita elimina "
-            "adultos y jóvenes; la 2ª rompe el ciclo antes de que eclosionen "
-            "los huevecillos."
+            "Tras una inspección el técnico aplica un cebo en polvo fino en las "
+            "zonas de refugio, que ya sabe identificar (no es una aspersión "
+            "general). La 1ª visita elimina adultos y jóvenes; la 2ª rompe el "
+            "ciclo antes de que eclosionen los huevecillos."
         ),
         "contencion": "Antes y entre visitas, no uses aerosol ni remedios caseros.",
         "precio": {
