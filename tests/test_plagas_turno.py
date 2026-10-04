@@ -361,10 +361,10 @@ async def test_chinches_se_confirman_con_dos_indicios_y_se_cotizan_sin_dar_vuelt
     assert caso["plaga"] == "chinches"  # confirmadas a la primera: nada de seguir interrogando
 
     llm.replies += [
-        _llama("cotizar", colchones=4, sillones=3, sillas_comedor=6),
+        _llama("cotizar", colchones=4, sillones=3, sillas_comedor=6, sillas_secretariales=0),
         _dice("x"),
     ]
-    texto = await _turno(ctx, "4 colchones, 3 sillones y 6 sillas, cuánto es", 2)
+    texto = await _turno(ctx, "4 colchones, 3 sillones, 6 sillas y ninguna silla secretarial, cuánto es", 2)
     assert texto is not None and "$2,000" in texto
     assert "por visita" in texto and "Cucaracha" not in texto
     assert ctx.crm.handoffs == []  # ya no se le pasa al dueño: se cotiza solo
@@ -391,8 +391,8 @@ async def test_chinches_el_modelo_no_etiqueta_y_aun_asi_se_confirma_y_se_sigue_a
     assert "enviado tus datos" not in texto and "te dará" not in texto.lower()
     assert ctx.crm.handoffs == []
 
-    llm.replies += [_llama("cotizar", colchones=4, sillones=3, sillas_comedor=6), _dice("x")]
-    texto = await _turno(ctx, "cuánto cuesta? tengo 4 colchones, 3 sillones y 6 sillas", 2)
+    llm.replies += [_llama("cotizar", colchones=4, sillones=3, sillas_comedor=6, sillas_secretariales=0), _dice("x")]
+    texto = await _turno(ctx, "cuánto cuesta? tengo 4 colchones, 3 sillones, 6 sillas y ninguna silla secretarial", 2)
     assert texto is not None and "$2,000" in texto and "por visita" in texto
     assert ctx.crm.handoffs == []
 
@@ -729,3 +729,20 @@ async def test_sí_pero_todavia_no_no_fuerza_horarios():
     assert herramienta_obligada(caso, "sí, va", agenda=True) == "propose_slots"
     assert herramienta_obligada(caso, "sí, pero aún no quiero agendar, solo el precio", agenda=True) is None
     assert herramienta_obligada(caso, "ok, lo voy a pensar", agenda=True) is None
+
+
+async def test_chinches_con_tres_sillas_secretariales_suma_cincuenta():
+    llm = FakeLLM()
+    ctx = _ctx(llm)
+    llm.replies += [
+        _llama("verificar_cobertura", zona="Escandón", codigo_postal="11800"),
+        _llama("identificar_plaga", plaga="chinches", senales=[]),
+        _dice("ok"),
+    ]
+    await _turno(ctx, "tengo manchas en las sábanas y piquetes, Escandón 11800", 1)
+    llm.replies += [
+        _llama("cotizar", colchones=2, sillones=0, sillas_comedor=0, sillas_secretariales=3),
+        _dice("x"),
+    ]
+    texto = await _turno(ctx, "2 colchones, 0 sillones, ningún comedor y 3 sillas secretariales, cuánto", 2)
+    assert texto is not None and "$1,550" in texto  # 1,500 + 50 por la 3ª secretarial

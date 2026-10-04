@@ -224,25 +224,32 @@ def test_chinches_pregunta_colchones_totales():
     assert "total" in cot.pregunta.lower() and "toda la casa" in cot.pregunta.lower()
 
 
-@pytest.mark.parametrize("colchones,sillones,sillas,esperado", [
-    (1, 0, 0, 1300),          # un colchón
-    (2, 0, 0, 1500),          # dos colchones: la base
-    (3, 0, 0, 1750),          # +250 por colchón adicional
-    (4, 3, 6, 2000),          # el caso de la prueba: 3 sillones y 6 sillas están incluidos
-    (4, 4, 6, 2100),          # un sillón de más: +100
-    (4, 3, 8, 2040),          # dos sillas de más: +20 c/u
-    (2, 5, 10, 1500 + 200 + 80),
+@pytest.mark.parametrize("colchones,sillones,sillas,secretariales,esperado", [
+    (1, 0, 0, 0, 1300),       # un colchón
+    (2, 0, 0, 0, 1500),       # dos colchones: la base
+    (3, 0, 0, 0, 1750),       # +250 por colchón adicional
+    (4, 3, 6, 0, 2000),       # el caso de la prueba: 3 sillones y 6 sillas están incluidos
+    (4, 4, 6, 0, 2100),       # un sillón de más: +100
+    (4, 3, 8, 0, 2040),       # dos sillas de más: +20 c/u
+    (2, 5, 10, 0, 1500 + 200 + 80),
+    (4, 3, 6, 2, 2000),       # hasta 2 sillas secretariales: sin costo
+    (4, 3, 6, 3, 2050),       # la 3ª: +50
+    (4, 3, 6, 5, 2150),       # 3 de más: +150
+    (2, 4, 7, 4, 1500 + 100 + 20 + 100),
 ])
-def test_precio_de_chinches_segun_la_formula_del_dueno(colchones, sillones, sillas, esperado):
-    cot = precios.cotizar("chinches", {"colchones": colchones, "sillones": sillones, "sillas_comedor": sillas})
+def test_precio_de_chinches_segun_la_formula_del_dueno(colchones, sillones, sillas, secretariales, esperado):
+    cot = precios.cotizar("chinches", {
+        "colchones": colchones, "sillones": sillones,
+        "sillas_comedor": sillas, "sillas_secretariales": secretariales,
+    })
     assert cot.estado == "ok" and cot.precio == esperado
     assert "por visita" in cot.linea_precio
 
 
-def test_chinches_pide_colchones_sillones_y_sillas_en_un_solo_mensaje():
+def test_chinches_pide_todos_los_muebles_en_un_solo_mensaje():
     cot = precios.cotizar("chinches", {})
     assert cot.estado == "falta"
-    assert all(p in cot.pregunta for p in ("colchones", "sillones", "sillas"))
+    assert all(p in cot.pregunta for p in ("colchones", "sillones", "sillas de comedor", "secretariales"))
     assert cot.pregunta.count("?") == 1
 
 
@@ -252,8 +259,10 @@ def test_chinches_pregunta_solo_lo_que_falta():
 
 
 def test_el_resumen_de_chinches_no_dice_1_colchones():
-    cot = precios.cotizar("chinches", {"colchones": 1, "sillones": 0, "sillas_comedor": 0})
-    assert "1 colchón)" in cot.linea_precio
+    cot = precios.cotizar("chinches", {
+        "colchones": 1, "sillones": 0, "sillas_comedor": 0, "sillas_secretariales": 1,
+    })
+    assert "1 colchón," in cot.linea_precio and "1 silla secretarial" in cot.linea_precio
 
 
 def test_sin_formula_en_el_catalogo_no_se_inventa_precio():

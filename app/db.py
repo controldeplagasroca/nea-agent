@@ -118,6 +118,43 @@ def _pending_send_desde_fila(row: Any) -> PendingSend:
     )
 
 
+def _pending_from_row(row: Any) -> PendingBooking:
+    return PendingBooking(
+        id=row["id"],
+        conversation_id=row["conversation_id"],
+        crm_conversation_id=row["crm_conversation_id"],
+        service_key=row["service_key"],
+        start_utc=row["start_utc"],
+        end_utc=row["end_utc"],
+        label=row["label"],
+        direccion=row["direccion"],
+        dia_confirmado=row["dia_confirmado"],
+        costo_cotizado=float(row["costo_cotizado"]),
+        telefono_cliente=row["telefono_cliente"],
+        kind=row["kind"],
+        google_event_id=row["google_event_id"],
+        nota=row["nota"],
+        estado=row["estado"],
+        reminders_sent=row["reminders_sent"],
+        avisado_al_dueno=row["avisado_al_dueno"],
+        next_reminder_at=row["next_reminder_at"],
+        created_at=row["created_at"],
+        resolved_at=row["resolved_at"],
+    )
+
+
+def _booking_from_row(row: Any) -> CalendarBooking:
+    return CalendarBooking(
+        id=row["id"],
+        conversation_id=row["conversation_id"],
+        google_event_id=row["google_event_id"],
+        service_key=row["service_key"],
+        start_utc=row["start_utc"],
+        end_utc=row["end_utc"],
+        created_at=row["created_at"],
+    )
+
+
 class PgStore(PgDispatchStore):
     """Store respaldado por Postgres (asyncpg)."""
 

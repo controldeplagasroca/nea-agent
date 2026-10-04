@@ -78,7 +78,7 @@ def limpiar_variables(crudas: dict[str, Any] | None) -> dict[str, Any]:
         out["m2"] = int(m2) if float(m2).is_integer() else round(m2, 1)
     for clave in (
         "refrigeradores", "registros", "sanitarios", "colchones", "sillones",
-        "sillas_comedor",
+        "sillas_comedor", "sillas_secretariales",
     ):
         n = _numero(crudas.get(clave))
         if n is not None and n >= 0:
@@ -86,10 +86,11 @@ def limpiar_variables(crudas: dict[str, Any] | None) -> dict[str, Any]:
     return out
 
 
-def _muebles(colchones: int, sillones: int, sillas: int) -> str:
+def _muebles(colchones: int, sillones: int, sillas: int, secretariales: int = 0) -> str:
     """«4 colchones, 3 sillones, 6 sillas»: en singular donde toca y sin ceros."""
     partes = [(colchones, "colchón", "colchones"), (sillones, "sillón", "sillones"),
-              (sillas, "silla", "sillas")]
+              (sillas, "silla", "sillas"),
+              (secretariales, "silla secretarial", "sillas secretariales")]
     return ", ".join(f"{n} {uno if n == 1 else varios}" for n, uno, varios in partes if n)
 
 
@@ -238,6 +239,7 @@ def cotizar(plaga: str, variables: dict[str, Any] | None) -> Cotizacion:
             conjunta = regla["pregunta_conjunta"] if len(faltan) == len(regla["variables"]) else ""
             return _falta(plaga, v, faltan[0], conjunta)
         n, sillones, sillas = v["colchones"], v["sillones"], v["sillas_comedor"]
+        secretariales = v["sillas_secretariales"]
         if n < 1:
             return _dueno(plaga, v, "sin colchones: lo revisa el negocio")
         base = (
@@ -246,16 +248,20 @@ def cotizar(plaga: str, variables: dict[str, Any] | None) -> Cotizacion:
         )
         de_sillones = max(0, sillones - regla["sillones_incluidos"]) * regla["sillon_extra"]
         de_sillas = max(0, sillas - regla["sillas_incluidas"]) * regla["silla_extra"]
-        precio = base + de_sillones + de_sillas
+        de_secretariales = (
+            max(0, secretariales - regla["secretariales_incluidas"]) * regla["secretarial_extra"]
+        )
+        precio = base + de_sillones + de_sillas + de_secretariales
         extras = []
-        if de_sillones or de_sillas:
+        if de_sillones or de_sillas or de_secretariales:
             extras.append(
-                f"Incluye hasta {regla['sillones_incluidos']} sillones y "
-                f"{regla['sillas_incluidas']} sillas de comedor; los de más se suman."
+                f"Incluye hasta {regla['sillones_incluidos']} sillones, "
+                f"{regla['sillas_incluidas']} sillas de comedor y "
+                f"{regla['secretariales_incluidas']} sillas secretariales; las de más se suman."
             )
         return Cotizacion(
             "ok", plaga, v, precio=precio, extras=extras,
-            linea_precio=f"{dinero(precio)} por visita ({_muebles(n, sillones, sillas)})",
+            linea_precio=f"{dinero(precio)} por visita ({_muebles(n, sillones, sillas, secretariales)})",
         )
 
     if tipo == "calculadora_muebles":

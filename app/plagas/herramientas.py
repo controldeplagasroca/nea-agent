@@ -155,6 +155,7 @@ ESQUEMAS_PROPIOS: list[dict[str, Any]] = [
                     "colchones": {"type": "integer", "description": "Colchones TOTALES de la casa"},
                     "sillones": {"type": "integer", "description": "Sillones totales"},
                     "sillas_comedor": {"type": "integer", "description": "Sillas de comedor totales"},
+                    "sillas_secretariales": {"type": "integer", "description": "Sillas secretariales o de oficina totales"},
                 },
             },
         },

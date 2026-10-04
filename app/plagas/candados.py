@@ -471,6 +471,7 @@ _PIDE_VARIABLE = {
     "colchones": r"\bcolchon",
     "sillones": r"\bsillon",
     "sillas_comedor": r"\bsillas\b",
+    "sillas_secretariales": r"\bsecretarial\w*|\bsillas? de oficina\b",
     "registros": r"\bregistros?\b",
     "sanitarios": r"\bcuantos (banos|sanitarios)\b",
     "refrigeradores": r"\brefrigeradores\b|\bcongeladores\b",
