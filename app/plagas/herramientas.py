@@ -1242,8 +1242,13 @@ class RuntimeDePlagas(ToolRuntime):
         await self._registrar_pendiente(chosen)
         await self._ctx.store.clear_offered_slots(self._conv.id)
         self.booked = True
-        self.handoff_reason = "cliente"
-        caso.escalado = f"Solicitud de visita: {dia}"
+        if not caso.cita.get("folio"):
+            # Sin folio (sin calendario propio o sin dueño que apruebe) la
+            # conversación se le pasa al dueño y la IA se apaga. CON folio NO:
+            # el dueño aprueba con «sí N» y Nea tiene que poder escribirle al
+            # cliente la confirmación, y el CRM no deja escribir con la IA apagada.
+            self.handoff_reason = "cliente"
+            caso.escalado = f"Solicitud de visita: {dia}"
         await self._ficha({
             "cita_solicitada": dia,
             "calificado": True,
@@ -1254,12 +1259,15 @@ class RuntimeDePlagas(ToolRuntime):
                 f"{caso.direccion_texto()}"
             )[:480],
         })
-        saludo = f"Listo, {self._nombre_lead}" if self._nombre_lead else "Listo"
+        saludo = f"Gracias, {self._nombre_lead}" if self._nombre_lead else "Gracias"
+        # Un solo mensaje, sin contradicción: se RECIBIÓ la solicitud, y todavía
+        # NO está confirmada (antes decía «Listo ✅ registré…» y luego «queda como
+        # solicitud», y el cliente no sabía si ya tenía cita).
         partes = [
-            f"✅ {saludo}: registré tu solicitud de visita {cuando}.",
+            f"📝 {saludo}: recibí tu solicitud de visita {cuando}.",
             f"📍 {caso.direccion_texto()}",
-            f"{dueno[0].upper()}{dueno[1:]} te la confirma por aquí en breve; "
-            "mientras tanto queda como solicitud.",
+            f"⏳ Todavía no está confirmada: {dueno} la revisa y te avisa por aquí "
+            "en cuanto la confirme.",
         ]
         if caso.cobertura.get("dia_restringido") is not None:
             partes.append(

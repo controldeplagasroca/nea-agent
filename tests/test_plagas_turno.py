@@ -220,8 +220,10 @@ async def test_la_visita_queda_como_solicitud_pendiente_del_dueno():
     texto = await _turno(ctx, "alcaldía Benito Juárez", 6)
     caso = await _caso(ctx)
     assert caso["cita"]["estado"] == "pendiente_de_aprobacion"
-    assert texto is not None and texto.startswith("✅")
-    assert "solicitud" in texto and "agendada" not in texto
+    # Un solo mensaje, sin contradicción: se RECIBIÓ y todavía NO está confirmada.
+    assert texto is not None and texto.startswith("📝")
+    assert "recibí tu solicitud" in texto and "Todavía no está confirmada" in texto
+    assert "Listo" not in texto and "✅" not in texto and "agendada" not in texto
     assert "Heriberto Frías 1125" in texto
     assert "no uses aerosol" in texto  # la indicación del catálogo
     assert ctx.crm.reservas == []  # el calendario real no se tocó

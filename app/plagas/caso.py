@@ -120,6 +120,16 @@ def paso_actual(caso: Caso, *, agenda: bool = True) -> Paso:
             "cero o cotizar: jamás se vuelve a cotizar lo que ya pagó.",
         )
 
+    if caso.cita is not None and caso.cita.get("estado") == "confirmada":
+        return Paso(
+            "visita_confirmada",
+            f"La visita está CONFIRMADA ({caso.cita.get('label')}) y el cliente ya "
+            "lo sabe. Si pregunta, díselo así y contesta sus dudas del servicio. "
+            f"Si quiere moverla o cancelarla: «permíteme un momento mientras te "
+            f"comunico con {dueno}» y llama handoff con motivo \"cliente\".",
+            "Volver a cotizar, ofrecer otros horarios o agendar otra visita.",
+        )
+
     if caso.cita is not None:
         return Paso(
             "visita_solicitada",

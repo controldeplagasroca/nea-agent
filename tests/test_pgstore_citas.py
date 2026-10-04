@@ -104,3 +104,17 @@ def test_ningun_nombre_sin_definir_en_el_codigo():
         pyflakes_api.check(ruta.read_text(encoding="utf-8"), str(ruta), reporter)
     sin_definir = [l for l in salida.getvalue().splitlines() if "undefined name" in l]
     assert sin_definir == []
+
+
+async def test_leer_una_conversacion_por_id():
+    fila = dict(
+        id=5, wa_identity="525523083093", crm_conversation_id="cv_1", organization_id="",
+        organization_slug="", phase="descubrimiento", greeted=False, media_notice_sent=False,
+        followup_due_at=None, followup_sent=False, stalled_at=None, caso={}, updated_at=AHORA,
+        created_at=AHORA, last_inbound_at=None, stall_since_message_id=None,
+    )
+    store, pool = _store(fila)
+    conv = await store.get_conversation(5)
+    assert conv is not None and conv.id == 5
+    store, _ = _store(None)
+    assert await store.get_conversation(99) is None

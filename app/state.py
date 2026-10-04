@@ -240,6 +240,7 @@ class Store(Protocol):
         organization_id: str = "",
         organization_slug: str = "",
     ) -> Conversation: ...
+    async def get_conversation(self, conversation_id: int) -> Conversation | None: ...
     async def update_conversation(self, conversation_id: int, **fields: Any) -> None: ...
     async def reset_conversation(self, conversation_id: int) -> None:
         """Borra historial + slots y regresa la conversación a estado inicial
@@ -466,6 +467,9 @@ class MemoryStore(MemoryDispatchStore):
         self.conversations[cid] = conv
         self._conv_by_identity[clave] = cid
         return conv
+
+    async def get_conversation(self, conversation_id: int) -> Conversation | None:
+        return self.conversations.get(conversation_id)
 
     async def update_conversation(self, conversation_id: int, **fields: Any) -> None:
         desconocidas = set(fields) - COLUMNAS_DE_CONVERSACION
