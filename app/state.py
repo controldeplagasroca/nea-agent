@@ -319,6 +319,11 @@ class Store(Protocol):
     async def resolve_pending_booking(self, pending_id: int, estado: str) -> None:
         """estado: 'aprobado' o 'rechazado' — marca resolved_at = now()."""
         ...
+    async def reagendar_pendiente(
+        self, pending_id: int, start_utc: datetime, end_utc: datetime, label: str
+    ) -> None:
+        """El dueño sugirió otro horario: la solicitud pasa a ese día y hora."""
+        ...
 
     # cola de envíos pendientes (respuestas que no pudieron salir en el turno)
     async def enqueue_pending_send(
@@ -643,6 +648,14 @@ class MemoryStore(MemoryDispatchStore):
         if pending is not None:
             pending.estado = estado
             pending.resolved_at = utcnow()
+
+    async def reagendar_pendiente(
+        self, pending_id: int, start_utc: datetime, end_utc: datetime, label: str
+    ) -> None:
+        pending = self.pending_bookings.get(pending_id)
+        if pending is not None:
+            pending.start_utc, pending.end_utc = start_utc, end_utc
+            pending.label = pending.dia_confirmado = label
 
     async def enqueue_pending_send(
         self,

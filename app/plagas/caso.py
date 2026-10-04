@@ -141,9 +141,12 @@ def paso_actual(caso: Caso, *, agenda: bool = True) -> Paso:
     if caso.cita is not None:
         return Paso(
             "visita_solicitada",
-            f"La visita ya quedó SOLICITADA ({caso.cita.get('label')}) y está "
-            f"pendiente de que {dueno} la confirme. Si el lead pregunta, díselo así.",
-            "Decir que la cita «ya quedó agendada» o «confirmada». Volver a cotizar.",
+            f"El horario ({caso.cita.get('label')}) SÍ está disponible y el cliente "
+            f"ya lo sabe; falta confirmarlo con el técnico designado y {dueno} lo "
+            "aprueba por mensaje. Si el lead pregunta, dile eso con calidez: que se le "
+            "avisa por aquí en cuanto quede confirmado.",
+            "Decir que la cita «ya quedó agendada» o «confirmada», decir «solicitud» o "
+            "pedirle que espere a que le contesten. Volver a cotizar.",
         )
 
     if caso.escalado:
@@ -358,7 +361,7 @@ def expediente(caso: Caso, *, agenda: bool = True) -> str:
         if caso.cita.get("estado") == "confirmada":
             lineas.append(f"- Visita AGENDADA y confirmada: {caso.cita.get('label')}.")
         else:
-            lineas.append(f"- Visita SOLICITADA (pendiente de confirmar): {caso.cita.get('label')}.")
+            lineas.append(f"- Horario disponible, pendiente de confirmar con el técnico: {caso.cita.get('label')}.")
 
     paso = paso_actual(caso, agenda=agenda)
     lineas.append("")

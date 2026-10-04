@@ -286,8 +286,8 @@ async def test_el_texto_al_cliente_no_se_contradice():
     ctx = _ctx()
     rt = await _con_solicitud(ctx)
     texto = rt.texto_garantizado
-    assert "recibí tu solicitud" in texto and "Todavía no está confirmada" in texto
-    assert "Listo" not in texto and "✅" not in texto
+    assert "ese horario sí lo tenemos disponible" in texto and "falta confirmarlo" in texto
+    assert "Listo" not in texto and "✅" not in texto and "solicitud" not in texto
 
 
 @respx.mock

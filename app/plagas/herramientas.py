@@ -37,6 +37,7 @@ from app.plagas import candados, catalogo, cobertura, diagnostico, precios
 from app.plagas.aviso import avisar_cita_agendada
 from app.plagas.caso import DIRECCION_CAMPOS, DIRECCION_NOMBRES, Caso
 from app.plagas.fechas import fecha_pedida
+from app.plagas.muebles import muebles_dichos
 from app.plagas.texto import normalizar
 from app.state import OfferedSlot
 from app.tools import (
@@ -876,6 +877,11 @@ class RuntimeDePlagas(ToolRuntime):
         if "m2" in utiles and not (nuevas.get("m2") or caso.variables.get("m2")):
             if (m2 := self.m2_dicho()) is not None:
                 nuevas["m2"] = m2
+        # Colchones, sillones y sillas que el cliente ya dijo con sus palabras (4 oct:
+        # los dio en su primer mensaje y el bot los volvió a preguntar).
+        for clave, cantidad in muebles_dichos(self._mensajes_lead).items():
+            if clave in utiles and clave not in nuevas and clave not in caso.variables:
+                nuevas[clave] = cantidad
         caso.variables.update(nuevas)
         cot = precios.cotizar(caso.plaga, caso.variables)
         nombre = catalogo.PLAGAS[caso.plaga]["nombre"]
@@ -1272,9 +1278,13 @@ class RuntimeDePlagas(ToolRuntime):
         Sí con calendario propio y plaga con regla de agenda: el horario elegido
         ya salió de la disponibilidad real, así que ES una confirmación. No en
         zonas de un solo día (Toluca, Lerma): ahí el dueño decide cada vez.
+
+        Solo si AGENDA_CONFIRMACION=inmediata. Por defecto es `aprobacion`: aunque
+        el horario esté libre, antes se confirma con el técnico designado (4 oct).
         """
         return (
-            self._ctx.calendar is not None
+            getattr(self._ctx.settings, "agenda_confirmacion", "aprobacion") == "inmediata"
+            and self._ctx.calendar is not None
             and SERVICIO_DE_PLAGA.get(self.caso.plaga or "") is not None
             and self.caso.cobertura.get("dia_restringido") is None
         )
@@ -1368,7 +1378,6 @@ class RuntimeDePlagas(ToolRuntime):
             if resultado is not None:
                 return resultado
         caso = self.caso
-        dueno = catalogo.NEGOCIO["dueno"]
         info = catalogo.PLAGAS[caso.plaga or ""] if caso.plaga else {}
         # La ficha y el expediente guardan el día sin «hoy»/«mañana»: se leen
         # días después y para entonces ya no es mañana.
@@ -1400,20 +1409,16 @@ class RuntimeDePlagas(ToolRuntime):
             )[:480],
         })
         saludo = f"Gracias, {self._nombre_lead}" if self._nombre_lead else "Gracias"
-        # Un solo mensaje, sin contradicción: se RECIBIÓ la solicitud, y todavía
-        # NO está confirmada (antes decía «Listo ✅ registré…» y luego «queda como
-        # solicitud», y el cliente no sabía si ya tenía cita).
+        # Un solo mensaje, sin contradicción y sin la palabra «solicitud»: el horario
+        # SÍ está disponible; lo que falta es confirmarlo con el técnico designado.
         partes = [
-            f"📝 {saludo}: recibí tu solicitud de visita {cuando}.",
+            f"👍 {saludo}: ese horario sí lo tenemos disponible {cuando}.",
             f"📍 {caso.direccion_texto()}",
-            f"⏳ Todavía no está confirmada: {dueno} la revisa y te avisa por aquí "
-            "en cuanto la confirme.",
+            f"⏳ Solo falta confirmarlo con el técnico que te corresponda; en cuanto "
+            "quede confirmado te avisamos por aquí.",
         ]
         if caso.cobertura.get("dia_restringido") is not None:
-            partes.append(
-                f"En tu zona damos servicio los {caso.cobertura.get('dia_nombre')}; "
-                "al confirmarte verificamos que haya técnico disponible ese día."
-            )
+            partes.append(f"En tu zona damos servicio los {caso.cobertura.get('dia_nombre')}.")
         if info.get("contencion"):
             partes.append(f"⚠️ {info['contencion']}")
         self.texto_garantizado = "\n\n".join(partes)

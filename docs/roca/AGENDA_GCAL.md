@@ -81,3 +81,18 @@ Nea ya no se calla sin que nadie se entere:
 El aviso sale a `AVISO_DUENO_WA` (o `OWNER_WA_ID`). Sigue la regla de WhatsApp de
 las 24 h: si no le has escrito al número del negocio en el último día, el aviso
 no sale y solo queda la bandeja de Vocero. Un «hola» cada mañana lo mantiene abierto.
+
+
+## Cómo se cierra la visita (`AGENDA_CONFIRMACION`)
+
+- **`aprobacion` (por defecto, 4 oct):** el cliente elige un horario LIBRE del calendario
+  (o propone uno y Nea lo consulta). Se le dice: «👍 ese horario sí lo tenemos disponible…
+  ⏳ solo falta confirmarlo con el técnico que te corresponda; en cuanto quede confirmado te
+  avisamos por aquí». A ti te llega «Cita #N por aprobar» a tu WhatsApp y respondes `sí N`
+  o `no N`: con `sí`, se crea el evento en Google Calendar y el cliente recibe «¡Confirmado!
+  ✅ Te esperamos el…»; con `no`, recibe horarios alternativos. La IA sigue encendida todo el
+  tiempo y la conversación sigue en Vocero.
+- **`inmediata`:** se agenda al instante en el calendario («tu visita quedó agendada…
+  cuando tengamos designado a tu técnico te enviaremos un mensaje») y a ti te llega solo un
+  aviso informativo. Para volver a esto, pon `AGENDA_CONFIRMACION=inmediata` y haz Redeploy.
+- Al cliente nunca se le dice «solicitud», «autorizar», el nombre del dueño ni «el dueño».
