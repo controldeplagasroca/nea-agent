@@ -887,7 +887,19 @@ async def run_turn(
                 hours=settings.followup_hours
             )
     updates.update(_caso_a_guardar(caso))
-    await ctx.store.update_conversation(conv.id, **updates)
+    try:
+        await ctx.store.update_conversation(conv.id, **updates)
+    except Exception:
+        # La respuesta YA salió. Que la base rechace la fase (pasó en producción
+        # con un CHECK de la Nea anterior) no debe tumbar el turno —la red de
+        # seguridad apagaría la IA de esa conversación— ni perder el expediente:
+        # se reintenta sin la fase, que es lo único prescindible.
+        logger.exception(
+            "turno %s: no pude guardar la fase %r — guardo el resto",
+            identity, updates.get("phase"),
+        )
+        updates.pop("phase", None)
+        await ctx.store.update_conversation(conv.id, **updates)
     if cerrar_sin_rumbo:
         # A la vista del dueño: en el panel del contacto sale «Cierre sin
         # rumbo» con la hora local. Sin esto, desde el CRM solo se veía a una
