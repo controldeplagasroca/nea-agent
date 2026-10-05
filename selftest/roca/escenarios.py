@@ -104,17 +104,71 @@ ESCENARIOS: list[Escenario] = [
         espera={"plaga": "cucaracha_americana", "sin_precio": True, "handoff": "modelo"},
     ),
     Escenario(
-        "chinches", "Chinches: pregunta colchones TOTALES y cotiza el dueño",
+        "chinches", "Chinches: pregunta colchones TOTALES y cotiza con la fórmula del dueño",
         apertura=[["buen día, creo que tengo chinches en mi cama"]],
         persona=(
             "Vives en un departamento en la colonia Escandón, CP 11800. Amaneces "
             "con PIQUETES EN LÍNEA en los brazos y viste MANCHITAS de sangre en las "
             "sábanas; regresaste de un viaje hace dos semanas. En tu casa hay 3 "
-            "colchones en total (el problema está en uno), 1 sillón y 4 sillas de "
-            "comedor. Quieres precio."
+            "colchones en total (el problema está en uno), 1 sillón, 4 sillas de "
+            "comedor y ninguna silla secretarial. Quieres precio."
         ),
-        espera={"plaga": "chinches", "sin_precio": True, "handoff": "modelo",
+        # 3 colchones: $1,500 (dos) + $250 (uno adicional); el sillón y las sillas están incluidos.
+        espera={"plaga": "chinches", "precio": 1750, "handoff": "ninguno",
                 "no_debe_decir": [r"caj(a|as) cebader"]},
+    ),
+    # --- Conversaciones reales del 4 oct: el cliente se adelanta y NO se le repite nada ---
+    Escenario(
+        "chinches_todo_en_el_primer_mensaje",
+        "Chinches: dirección, muebles y plaga en el PRIMER mensaje (caso Ethel)",
+        apertura=[[
+            "hola, vivo en portales en 03300 calle vertiz 2200 alcaldia benito juarez, "
+            "tengo chinche de cama, quiero agendar, tengo 2 colchones, 2 sillones y "
+            "1 silla secretarial, sin sillas de comedor"
+        ]],
+        persona=(
+            "Eres Ethel. Vives en un departamento (interior 4) en Portales, calle Vértiz "
+            "2200, alcaldía Benito Juárez, CP 03300; referencia: hay una escuela de música "
+            "cerca. Ya diste tus datos en tu primer mensaje y te molesta que te los "
+            "repitan. Si te dan el precio lo aceptas, eliges el primer horario que te "
+            "ofrezcan y, si te piden algo que ya dijiste, lo reclamas."
+        ),
+        espera={
+            "plaga": "chinches", "precio": 1500, "cita": True,
+            # Lo dicho no se vuelve a preguntar: ni muebles, ni calle, ni colonia.
+            "no_debe_decir": [r"cu[aá]ntos colchones", r"cu[aá]ntos sillones", r"direcci[oó]n completa",
+                              r"en qu[eé] colonia", r"qu[eé] calle"],
+        },
+    ),
+    Escenario(
+        "chinches_contesta_donde_las_ve",
+        "Chinches: contesta «en cama y cabecera», «ya las vi» y «pican» y no se le repite la pregunta",
+        apertura=[
+            ["hola, tengo un problema con insectos, vivo en la Escandón CP 11800"],
+            ["en cama y cabecera"],
+            ["ya las vi, son chinches, pican y ya no puedo dormir"],
+        ],
+        persona=(
+            "Vives en un departamento en la Escandón, CP 11800. Tienes 2 colchones y "
+            "nada más de muebles. Si te dan el precio lo aceptas."
+        ),
+        espera={
+            "plaga": "chinches", "precio": 1500,
+            "no_debe_decir": [r"has visto los insectos", r"amanecen con piquetes"],
+        },
+    ),
+    Escenario(
+        "cucarachas_sin_pistas",
+        "«Tengo cucarachas» a secas: se le presentan las dos especies",
+        apertura=[["hola, tengo cucarachas"]],
+        persona=(
+            "Vives en una casa en la Del Valle, CP 03100. Son CHIQUITAS, café claro, "
+            "en la COCINA detrás del refri. Quieres precio."
+        ),
+        espera={
+            "plaga": "cucaracha_alemana",
+            "turno_bot_debe": {1: r"alemana[\s\S]*americana"},
+        },
     ),
     Escenario(
         "roedores", "Roedores: jamás le pregunta al lead cuántas cajas",

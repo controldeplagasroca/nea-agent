@@ -25,6 +25,11 @@ _COSAS = {
     "sillas_comedor": r"sillas?\s+(?:de\s+)?comedor",
     "sillones": r"(?:sillon(?:es)?|sofas?)",
     "colchones": r"colchon(?:es)?",
+    # Lo que pide el precio de la cucaracha americana y del local comercial. «Dos
+    # baños y medio» no es 2: queda sin leer y se pregunta.
+    "sanitarios": r"(?:banos?|sanitarios?|wc)(?!\s+y\s+medio)",
+    "registros": r"(?:registros?|coladeras?)",
+    "refrigeradores": r"(?:refris?|refrigeradores?|congeladores?)",
 }
 _CERO = r"(?:nin?gun[ao]s?|ni\s+(?:una|un)|cero|sin|no\s+(?:tengo|hay|tenemos|cuento\s+con))"
 
