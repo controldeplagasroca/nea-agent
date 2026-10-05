@@ -56,6 +56,11 @@ class Caso:
     # Cucaracha alemana Y americana a la vez (chicas en un lado, grandes en otro).
     # `plaga` queda en la alemana; el precio de las dos lo define un técnico.
     ambas: bool = False
+    # Cambio de día/hora de una visita ya registrada, esperando al técnico:
+    # {label, start_utc, folio}. La visita de antes sigue en pie hasta que se apruebe.
+    cambio: dict[str, Any] | None = None
+    # Ya se le preguntó por qué cancela (una sola vez; después sí se cancela).
+    cancelacion_preguntada: bool = False
 
     @classmethod
     def desde(cls, crudo: Any) -> "Caso":
@@ -123,18 +128,34 @@ def paso_actual(caso: Caso, *, agenda: bool = True) -> Paso:
             "cero o cotizar: jamás se vuelve a cotizar lo que ya pagó.",
         )
 
+    if caso.cambio is not None and caso.cita is not None:
+        return Paso(
+            "cambio_solicitado",
+            f"Pidió mover su visita a {caso.cambio.get('label')}: ese horario SÍ está "
+            "disponible, el cliente ya lo sabe y falta confirmarlo con el técnico "
+            f"designado ({dueno} lo aprueba por mensaje). Mientras tanto su visita "
+            f"de antes ({caso.cita.get('label')}) sigue en pie. Si pregunta, díselo "
+            "con calidez; se le avisa por aquí en cuanto quede confirmado. Si quiere "
+            "otra hora distinta, llama cambiar_visita otra vez.",
+            "Pasarlo con alguien, decir «solicitud» o que ya quedó movida, o "
+            "ofrecer horarios por tu cuenta.",
+        )
+
     if caso.cita is not None and caso.cita.get("estado") == "confirmada":
         return Paso(
             "visita_confirmada",
             f"La visita está AGENDADA y CONFIRMADA ({caso.cita.get('label')}) y el "
             "cliente ya lo sabe. Si pregunta, díselo así y contesta sus dudas del "
             "servicio; cuando se designe a su técnico se le enviará un mensaje por aquí. "
-            "Si quiere CANCELAR: con mucha amabilidad pregúntale por qué (una sola "
-            "pregunta) y ofrécele reagendar para otro día. Si dice que va a verificar "
-            "su fecha, respétalo («sin problema, aquí estaré») y no insistas. Si ya "
-            f"tiene una fecha nueva: «permíteme un momento mientras te comunico con "
-            f"{dueno}» y llama handoff con motivo \"cliente\".",
-            "Decir «solicitud», «pendiente» o que alguien tiene que autorizarla. "
+            "Si quiere CAMBIAR el día u hora: llama cambiar_visita con accion "
+            "\"reagendar\" (el sistema revisa el calendario y avisa al técnico). Si "
+            "quiere CANCELAR: llama cambiar_visita con accion \"cancelar\"; el "
+            "sistema le pregunta por qué con amabilidad y le ofrece reagendar. Cuando "
+            "ya contestó y sigue queriendo cancelar, llámala otra vez con su motivo y "
+            "confirmado=true. Si dice que va a verificar su fecha, respétalo («sin "
+            "problema, aquí estaré») y no insistas.",
+            "Decir «solicitud», «pendiente» o que alguien tiene que autorizarla. Pasarlo "
+            "con alguien por un cambio o cancelación (se hace con cambiar_visita). "
             "Volver a cotizar, ofrecer otros horarios por tu cuenta o agendar otra visita.",
         )
 
@@ -144,7 +165,8 @@ def paso_actual(caso: Caso, *, agenda: bool = True) -> Paso:
             f"El horario ({caso.cita.get('label')}) SÍ está disponible y el cliente "
             f"ya lo sabe; falta confirmarlo con el técnico designado y {dueno} lo "
             "aprueba por mensaje. Si el lead pregunta, dile eso con calidez: que se le "
-            "avisa por aquí en cuanto quede confirmado.",
+            "avisa por aquí en cuanto quede confirmado. Si quiere otro día u hora, o "
+            "cancelar, llama cambiar_visita (accion «reagendar» o «cancelar»).",
             "Decir que la cita «ya quedó agendada» o «confirmada», decir «solicitud» o "
             "pedirle que espere a que le contesten. Volver a cotizar.",
         )
@@ -357,6 +379,10 @@ def expediente(caso: Caso, *, agenda: bool = True) -> str:
         )
     if any(caso.direccion.values()):
         lineas.append(f"- Dirección que lleva dada: {caso.direccion_texto()}.")
+    if caso.cambio:
+        lineas.append(
+            f"- Pidió mover la visita a {caso.cambio.get('label')} (pendiente del técnico)."
+        )
     if caso.cita:
         if caso.cita.get("estado") == "confirmada":
             lineas.append(f"- Visita AGENDADA y confirmada: {caso.cita.get('label')}.")

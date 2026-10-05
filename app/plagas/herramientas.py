@@ -29,12 +29,17 @@ from typing import Any
 
 from app import hostility
 
-from app.approvals import construir_description_evento, enviar_solicitud_aprobacion, next_reminder
+from app.approvals import (
+    _hora_24,
+    construir_description_evento,
+    enviar_solicitud_aprobacion,
+    next_reminder,
+)
 from app.crm import CrmError
 from app.gcal import SERVICE_RULES, SERVICIO_DE_PLAGA, CalendarError, CalendarSlotTaken
 from app.horarios import _coincide, analizar_horas
 from app.plagas import candados, catalogo, cobertura, diagnostico, precios
-from app.plagas.aviso import avisar_cita_agendada
+from app.plagas.aviso import _enviar_al_dueno, avisar_cita_agendada
 from app.plagas.caso import DIRECCION_CAMPOS, DIRECCION_NOMBRES, Caso
 from app.plagas.fechas import fecha_pedida
 from app.plagas.muebles import muebles_dichos
@@ -172,6 +177,32 @@ ESQUEMAS_PROPIOS: list[dict[str, Any]] = [
     },
 ]
 
+CAMBIAR_VISITA: dict[str, Any] = {
+    "type": "function",
+    "function": {
+        "name": "cambiar_visita",
+        "description": (
+            "El cliente ya tiene una visita registrada y quiere CAMBIAR su día u hora "
+            "(accion=reagendar) o CANCELARLA (accion=cancelar). El sistema revisa el "
+            "calendario, avisa al técnico y le escribe al cliente: no agregues nada "
+            "después. Para cancelar, la primera llamada solo pregunta el motivo; cuando "
+            "el cliente ya contestó y confirma que cancela, llámala otra vez con "
+            "motivo y confirmado=true."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "accion": {"type": "string", "enum": ["reagendar", "cancelar"]},
+                "fecha": {"type": "string", "description": "AAAA-MM-DD del día nuevo (reagendar)"},
+                "hora": {"type": "string", "description": "HH:MM en 24 h de la hora nueva (reagendar)"},
+                "motivo": {"type": "string", "description": "Por qué cambia o cancela, con sus palabras"},
+                "confirmado": {"type": "boolean", "description": "true solo si dijo claramente que quiere cancelar"},
+            },
+            "required": ["accion"],
+        },
+    },
+}
+
 _DIRECCION_PROPS = {
     "calle": {"type": "string"},
     "numero_exterior": {"type": "string"},
@@ -214,7 +245,7 @@ def esquemas(agenda: bool, aprobacion: bool) -> list[dict[str, Any]]:
             "lead ya haya dado: si falta alguno, te dice cuál pedir."
         )
         book["function"]["parameters"]["properties"].update(_DIRECCION_PROPS)
-        out += [propose, book]
+        out += [propose, book, CAMBIAR_VISITA]
     handoff = _esquema("handoff")
     handoff["function"]["parameters"]["properties"] = {
         "reason": {
@@ -293,6 +324,8 @@ class RuntimeDePlagas(ToolRuntime):
                 return await self._cotizar(args)
             if name == "handoff":
                 return await self._handoff_del_modelo(args)
+            if name == "cambiar_visita":
+                return await self._cambiar_visita(args)
             if name in ("update_ficha", "route_out"):
                 # No se le enseñan al modelo en este vertical; si las inventa,
                 # se le dice qué sí existe en vez de fingir que funcionaron.
@@ -1239,6 +1272,225 @@ class RuntimeDePlagas(ToolRuntime):
             f"⚠️ Zona {zona} (solo {c.get('dia_nombre', 'ese día')}): confirma que "
             "haya un técnico que vaya ese día antes de aprobar."
         )
+
+    # --------------------------------------------- cambiar o cancelar la visita ---
+
+    async def _cambiar_visita(self, args: dict[str, Any]) -> dict[str, Any]:
+        """Reagendar o cancelar una visita ya registrada.
+
+        Todo lo decide el servidor: el modelo solo dice qué quiere el cliente. Un
+        cambio pasa por el mismo candado que una visita nueva (horario real del
+        calendario + aprobación del técnico); la de antes sigue en pie hasta
+        entonces. La cancelación pregunta una vez por qué y ofrece reagendar.
+        """
+        if self.caso.cita is None:
+            return {
+                "ok": False,
+                "error": "sin_visita",
+                "instrucciones": "No tiene una visita registrada: sigue el PASO ACTUAL.",
+            }
+        if str(args.get("accion") or "").strip().lower() == "cancelar":
+            return await self._cancelar_visita(args)
+        return await self._reagendar_visita(args)
+
+    def _horario_pedido(self, args: dict[str, Any], tz: Any, hoy: date) -> tuple[date | None, tuple[int, int] | None]:
+        """Día y hora que pidió el cliente: de sus palabras primero, de lo que
+        mandó el modelo después (p. ej. cuando solo contesta «a las 11»)."""
+        texto = self._texto_lead
+        pedida = fecha_pedida(texto, hoy)
+        fecha: date | None = date.fromisoformat(pedida) if pedida else None
+        if fecha is None and args.get("fecha"):
+            try:
+                fecha = date.fromisoformat(str(args["fecha"]))
+            except ValueError:
+                fecha = None
+        hm: tuple[int, int] | None = None
+        horas = analizar_horas(texto)
+        if horas:
+            hm = _hora_24(horas[0].hora, horas[0].minuto, horas[0].meridiem)
+        elif args.get("hora"):
+            m = re.match(r"^\s*(\d{1,2})(?::(\d{2}))?\s*$", str(args["hora"]))
+            if m and int(m.group(1)) < 24:
+                hm = (int(m.group(1)), int(m.group(2) or 0))
+        return fecha, hm
+
+    async def _reagendar_visita(self, args: dict[str, Any]) -> dict[str, Any]:
+        ctx, caso = self._ctx, self.caso
+        servicio = SERVICIO_DE_PLAGA.get(caso.plaga or "")
+        if ctx.calendar is None or not ctx.settings.owner_identity or servicio is None:
+            # Sin agenda propia no hay cómo revisar el horario: lo ve el técnico.
+            await self._escalar(
+                "cliente",
+                f"Quiere mover su visita ({caso.cita.get('label')}): {self._texto_lead[:160]}",
+                self._puente(),
+            )
+            return {"ok": True, "estado": "con_el_dueno", "instrucciones": "Ya se le avisó. No agregues nada."}
+        tz = _zona_del_negocio(ctx)
+        hoy = datetime.now(tz).date()
+        fecha, hm = self._horario_pedido(args, tz, hoy)
+        if fecha is None or hm is None:
+            return {
+                "ok": False,
+                "error": "falta_dia_u_hora",
+                "instrucciones": (
+                    "Pregúntale en una línea qué día y a qué hora le acomoda; con su "
+                    "respuesta vuelve a llamar cambiar_visita."
+                ),
+            }
+        dia = caso.cobertura.get("dia_restringido")
+        if dia is not None and fecha.weekday() != dia:
+            return {
+                "ok": False,
+                "error": "dia_no_disponible_en_su_zona",
+                "instrucciones": (
+                    f"En su zona solo se da servicio los {caso.cobertura.get('dia_nombre')}. "
+                    "Díselo con honestidad y pregúntale qué día de esos le acomoda."
+                ),
+            }
+        res = await ToolRuntime._propose_slots(self, {"fecha": fecha.isoformat()})
+        if not res.get("ok"):
+            return res
+        ofrecidos = await ctx.store.get_offered_slots(self._conv.id)
+        elegido = next(
+            (s for s in ofrecidos
+             if (s.start_utc.astimezone(tz).hour, s.start_utc.astimezone(tz).minute) == hm),
+            None,
+        )
+        if elegido is None:
+            libres = ", ".join(res.get("horas_libres") or [])
+            res["instrucciones"] = (
+                f"Esa hora NO está libre ese día. Horas libres: {libres}. Díselo con "
+                "amabilidad y ofrécele las más cercanas (máximo 3, con su etiqueta tal "
+                "cual); cuando elija, vuelve a llamar cambiar_visita con su fecha y hora."
+            )
+            return res
+
+        fin = elegido.end_utc or elegido.start_utc + timedelta(
+            minutes=SERVICE_RULES[servicio].duration_minutes
+        )
+        antes = str(caso.cita.get("label") or "")
+        dia_nuevo = re.sub(r"^(hoy|mañana)\s+", "", elegido.label)
+        motivo = str(args.get("motivo") or "").strip()[:160]
+        nota = f"CAMBIO DE VISITA. Antes: {antes}." + (f" Motivo: {motivo}." if motivo else "")
+        activa = await ctx.store.get_active_calendar_booking(self._conv.id)
+        if activa is not None:
+            pending = await ctx.store.create_pending_booking(
+                conversation_id=self._conv.id,
+                crm_conversation_id=self._crm_conv_id,
+                service_key=servicio,
+                start_utc=elegido.start_utc,
+                end_utc=fin,
+                label=elegido.label,
+                direccion=caso.direccion_texto(),
+                dia_confirmado=elegido.label,
+                next_reminder_at=next_reminder(ctx.settings.booking_reminder_minutes),
+                telefono_cliente=self._conv.wa_identity,
+                kind="reagendar",
+                google_event_id=activa.google_event_id,
+                nota=nota[:300],
+            )
+            caso.cambio = {
+                "label": dia_nuevo,
+                "start_utc": elegido.start_utc.isoformat(),
+                "folio": pending.id,
+            }
+            sigue = f" Mientras tanto, tu visita del {antes} sigue en pie." if antes else ""
+        else:
+            # La visita aún espera su primera aprobación: se mueve ESA solicitud.
+            abierta = next(
+                (p for p in await ctx.store.list_pending_bookings_pendientes()
+                 if p.conversation_id == self._conv.id),
+                None,
+            )
+            if abierta is None:
+                await self._escalar(
+                    "cliente",
+                    f"Quiere mover su visita ({antes}): {self._texto_lead[:160]}",
+                    self._puente(),
+                )
+                return {"ok": True, "estado": "con_el_dueno", "instrucciones": "Ya se le avisó. No agregues nada."}
+            await ctx.store.reagendar_pendiente(abierta.id, elegido.start_utc, fin, elegido.label)
+            pending = await ctx.store.get_pending_booking(abierta.id) or abierta
+            caso.cita.update(label=dia_nuevo, start_utc=elegido.start_utc.isoformat(), folio=pending.id)
+            sigue = ""
+        await enviar_solicitud_aprobacion(ctx, pending)
+        await ctx.store.clear_offered_slots(self._conv.id)
+        await self._ficha({"notas": f"{nota} Nuevo horario pendiente de aprobar: {dia_nuevo}."[:480]})
+        saludo = f"Gracias, {self._nombre_lead}" if self._nombre_lead else "Gracias"
+        cuando = f"para {elegido.label}" if dia_nuevo != elegido.label else f"para el {elegido.label}"
+        self.texto_garantizado = (
+            f"👍 {saludo}: ese horario sí lo tenemos disponible {cuando}.\n\n"
+            "⏳ Solo falta confirmarlo con el técnico que te corresponda; en cuanto "
+            f"quede confirmado te avisamos por aquí.{sigue}"
+        )
+        return {
+            "ok": True,
+            "estado": "cambio_registrado",
+            "instrucciones": "Ya se le envió al lead el mensaje. No agregues nada.",
+        }
+
+    async def _cancelar_visita(self, args: dict[str, Any]) -> dict[str, Any]:
+        ctx, caso = self._ctx, self.caso
+        if not caso.cancelacion_preguntada:
+            # Primera vez: con mucha amabilidad se pregunta por qué y se ofrece
+            # reagendar. Nada se cancela todavía.
+            caso.cancelacion_preguntada = True
+            self.texto_garantizado = (
+                "Claro, sin problema 🙏 ¿Me cuentas si hubo algún inconveniente? "
+                "Si prefieres, con gusto reagendamos tu visita para otro día."
+            )
+            return {
+                "ok": True,
+                "estado": "motivo_preguntado",
+                "instrucciones": "Ya se le preguntó por qué. No agregues nada; espera su respuesta.",
+            }
+        if args.get("confirmado") is not True:
+            return {
+                "ok": False,
+                "error": "falta_confirmacion",
+                "instrucciones": (
+                    "Cancela SOLO cuando ya contestó y dice claramente que sí quiere "
+                    "cancelar (confirmado=true, con su motivo). Si dijo que va a "
+                    "verificar su fecha, no canceles: «sin problema, aquí estaré»."
+                ),
+            }
+        antes = str(caso.cita.get("label") or "su visita")
+        motivo = str(args.get("motivo") or "").strip()[:200] or self._texto_lead[:200]
+        manual = ""
+        activa = await ctx.store.get_active_calendar_booking(self._conv.id)
+        if activa is not None:
+            try:
+                await ctx.calendar.cancel_booking(activa.google_event_id)
+            except (CalendarError, AttributeError) as exc:
+                logger.warning("plagas: no pude borrar el evento al cancelar: %s", exc)
+                manual = " ⚠️ No pude borrar el evento del Calendar: quítalo a mano."
+            await ctx.store.cancel_calendar_booking(self._conv.id)
+        for abierta in await ctx.store.list_pending_bookings_pendientes():
+            if abierta.conversation_id == self._conv.id:
+                await ctx.store.resolve_pending_booking(abierta.id, "rechazado")
+        caso.cita = None
+        caso.cambio = None
+        caso.cancelacion_preguntada = False
+        destino = ctx.settings.aviso_dueno_identity or ctx.settings.owner_identity
+        if destino:
+            quien = self._nombre_lead or "Cliente"
+            await _enviar_al_dueno(
+                ctx,
+                destino,
+                f"❌ {quien} ({self._conv.wa_identity}) canceló su visita del {antes}.\n"
+                f"Motivo: {motivo}{manual}",
+            )
+        await self._ficha({"notas": f"VISITA CANCELADA por el cliente ({antes}). Motivo: {motivo}"[:480]})
+        nombre = f", {self._nombre_lead}" if self._nombre_lead else ""
+        self.texto_garantizado = (
+            f"Listo{nombre}: tu visita del {antes} quedó cancelada 🙏 Si más adelante "
+            "quieres retomarla, aquí estaremos para ayudarte."
+        )
+        return {
+            "ok": True,
+            "estado": "cancelada",
+            "instrucciones": "Ya se le envió al lead el mensaje. No agregues nada.",
+        }
 
     async def _registrar_pendiente(self, chosen: OfferedSlot) -> None:
         """Con agenda propia: la solicitud queda con folio y se le pide al dueño

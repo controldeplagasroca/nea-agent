@@ -272,7 +272,7 @@ async def test_resolver_aprobacion_reagendar_mueve_el_evento_existente(
     assert resolved.estado == "aprobado"
 
     lead_body = json.loads(lead_msg_route.calls[-1].request.content)
-    assert "movida" in lead_body["text"].lower()
+    assert "reagendada" in lead_body["text"].lower()
 
 
 async def test_resolver_aprobacion_reagendar_rechazado_no_mueve_avisa_al_lead(
