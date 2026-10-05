@@ -525,13 +525,16 @@ PLAGAS: dict[str, dict[str, Any]] = {
                     r"\b(vi|vimos|veo|vemos|encontr\w*|salen|aparecen|andan|hay)\b[^.?!]{0,40}"
                     r"\b(animalit\w*|bichit\w*|bicho\w*|insect\w*|chinche\w*)\b"
                     r"|\b(animalit\w*|bichit\w*|bicho\w*|insect\w*)\b[^.?!]{0,30}\b(cabecera|colchon|costura\w*|cama|sabana\w*)\b"
+                    # Contestar dónde las ve («en cama y cabecera», «ya las vi») es decir que las vio.
+                    r"|\ben (la |mi |el |mis )?(cama|cabecera|colchon|costuras?|sabanas?)\b"
+                    r"|\b(ya )?(las|los) (vi|veo|he visto|vimos|encontre|encontramos)\b"
                 ),
             },
             "piquetes_linea": {
                 "texto": "piquetes en línea al despertar",
                 "pregunta": "¿Amanecen con piquetes en línea o en hilera?",
                 "claves": ["piquete", "ronch", "linea", "hilera", "amanec", "despert", "picad"],
-                "detecta": r"\bpiquete\w*|\bpicadura\w*|\bronch\w*|\bme (pican|picaron|amanezco picad\w*)",
+                "detecta": r"\bpiquete\w*|\bpicadura\w*|\bronch\w*|\bme (pican|picaron|amanezco picad\w*)|\bpican?\b",
             },
             "manchas_sabanas": {
                 "texto": "manchas oscuras o de sangre en las sábanas",
