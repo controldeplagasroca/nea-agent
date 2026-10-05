@@ -668,6 +668,11 @@ class PgStore(PgDispatchStore):
             estado,
         )
 
+    async def set_pending_estado(self, pending_id: int, estado: str) -> None:
+        await self.pool.execute(
+            "UPDATE pending_bookings SET estado = $2 WHERE id = $1", pending_id, estado
+        )
+
     async def enqueue_pending_send(
         self,
         conversation_id: int,

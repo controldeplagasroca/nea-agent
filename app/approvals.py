@@ -114,7 +114,7 @@ def formatear_solicitud(pending: PendingBooking) -> str:
             f"Dirección: {pending.direccion}\n"
             f"{nota_r}\n"
             f'Responde "sí {pending.id}" o "no {pending.id}" para confirmar o rechazar, '
-            f'o "cambiar {pending.id} martes 10 am" para proponer otro horario.'
+            f'o "cambiar {pending.id} martes 10 am" para proponerle otro horario al cliente.'
         )
     nota = f"{pending.nota}\n" if pending.nota else ""
     return (
@@ -124,7 +124,7 @@ def formatear_solicitud(pending: PendingBooking) -> str:
         f"Dirección: {pending.direccion}\n"
         f"{nota}\n"
         f'Responde "sí {pending.id}" o "no {pending.id}" para confirmar o rechazar.\n'
-        f'¿Otro horario? Escribe "cambiar {pending.id} martes 10 am" y lo agendo y aviso al cliente.'
+        f'¿Otro horario? Escribe "cambiar {pending.id} martes 10 am" y le pregunto al cliente si le queda.'
     )
 
 
@@ -203,7 +203,46 @@ async def proponer_horario(ctx: AppContext, pending: PendingBooking, resto: str)
     await ctx.store.reagendar_pendiente(pending.id, inicio.astimezone(timezone.utc), fin.astimezone(timezone.utc), etiqueta)
     pending.start_utc, pending.end_utc = inicio.astimezone(timezone.utc), fin.astimezone(timezone.utc)
     pending.label = pending.dia_confirmado = etiqueta
-    return await resolver_aprobacion(ctx, pending, True)
+    # Nada se agenda todavía: el cliente pidió OTRO horario y hay que preguntarle si le
+    # queda bien. Mientras responde, la solicitud espera (ya no se le reenvía al dueño).
+    await ctx.store.set_pending_estado(pending.id, "esperando_cliente")
+    pending.estado = "esperando_cliente"
+    cuando = _sin_relativo(etiqueta)
+    await _poner_contrapropuesta(ctx, pending, cuando)
+    _avisos_fallidos.set(0)
+    await _notificar_lead(ctx, pending, texto_de_contrapropuesta(cuando))
+    nota = NOTA_LEAD_SIN_AVISO if _avisos_fallidos.get() else ""
+    return (
+        f"Listo, le propuse al cliente el {cuando}. En cuanto lo acepte queda agendada "
+        f"(#{pending.id}); si propone otro horario te aviso.{nota}"
+    )
+
+
+def texto_de_contrapropuesta(cuando: str) -> str:
+    """Lo que se le dice al cliente cuando el técnico propone otro horario."""
+    return (
+        "Gracias por esperar 🙏 Lamentablemente ya no tenemos disponible ese horario, "
+        "ya que se van programando conforme nos escriben nuestros clientes. "
+        f"¿Te queda bien el {cuando}? 📅 Si prefieres otro día u hora, dime cuál te acomoda."
+    )
+
+
+async def _poner_contrapropuesta(ctx: AppContext, pending: PendingBooking, cuando: str) -> None:
+    """Anota en el expediente que el cliente tiene que contestar la sugerencia."""
+    try:
+        conv = await ctx.store.get_conversation(pending.conversation_id)
+        if conv is None:
+            return
+        caso = dict(conv.caso or {})
+        caso["contrapropuesta"] = {
+            "folio": pending.id,
+            "label": cuando,
+            "start_utc": pending.start_utc.isoformat(),
+            "kind": pending.kind,
+        }
+        await ctx.store.update_conversation(pending.conversation_id, caso=caso)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("approvals: no pude anotar la contrapropuesta de #%s: %s", pending.id, exc)
 
 
 def parece_aprobacion(
@@ -306,7 +345,28 @@ NOTA_LEAD_SIN_AVISO = (
 )
 
 
+# Cuando la confirmación ocurre DENTRO del turno del cliente (aceptó el horario que
+# sugirió el técnico), el texto no se manda aparte: se junta aquí y el turno lo
+# entrega como su respuesta. Mandarlo dos veces sería repetirse.
+_aviso_en_linea: ContextVar[list[str] | None] = ContextVar("aviso_en_linea", default=None)
+
+
+async def confirmar_en_linea(ctx: AppContext, pending: PendingBooking) -> tuple[str, str | None]:
+    """Aprueba `pending` y regresa (texto para el dueño, texto para el cliente o None)."""
+    capturado: list[str] = []
+    token = _aviso_en_linea.set(capturado)
+    try:
+        para_el_dueno = await resolver_aprobacion(ctx, pending, True)
+    finally:
+        _aviso_en_linea.reset(token)
+    return para_el_dueno, (capturado[-1] if capturado else None)
+
+
 async def _notificar_lead(ctx: AppContext, pending: PendingBooking, texto: str) -> None:
+    en_linea = _aviso_en_linea.get()
+    if en_linea is not None:
+        en_linea.append(texto)
+        return
     try:
         await ctx.crm.send_message(pending.crm_conversation_id, texto)
         await ctx.store.add_message(pending.conversation_id, "assistant", texto)
