@@ -23,7 +23,7 @@ from dataclasses import dataclass
 from app.plagas import catalogo
 from app.plagas.texto import normalizar, palabras
 
-MAX_CARACTERES = 480  # ≈ 3-4 líneas de WhatsApp (el tope del negocio es ~400)
+MAX_CARACTERES = 600  # tope del negocio (4 oct): lo normal es 300-500; 600 solo si hace falta
 MAX_LINEAS = 7  # con texto; una lista de 3 horarios + saludo + pregunta cabe
 
 

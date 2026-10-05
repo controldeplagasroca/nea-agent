@@ -395,7 +395,7 @@ async def test_chinches_el_modelo_no_etiqueta_y_aun_asi_se_confirma_y_se_sigue_a
     )
     caso = await _caso(ctx)
     assert caso["plaga"] == "chinches"
-    assert texto is not None and "Vapor y calor" in texto  # el tratamiento lo pone el servidor
+    assert texto is not None and "vapor de agua" in texto  # el tratamiento lo pone el servidor
     assert "enviado tus datos" not in texto and "te dará" not in texto.lower()
     assert ctx.crm.handoffs == []
 

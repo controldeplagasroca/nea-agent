@@ -106,11 +106,15 @@ def formatear_solicitud(pending: PendingBooking) -> str:
     rule = SERVICE_RULES.get(pending.service_key)
     plaga = rule.label if rule is not None else pending.service_key
     if pending.kind == "reagendar":
+        nota_r = f"{pending.nota}\n" if pending.nota else ""
         return (
             f"🔄 Reagendo #{pending.id} por aprobar\n"
             f"Plaga: {plaga}\n"
-            f"Nueva fecha: {pending.label}\n\n"
-            f'Responde "sí {pending.id}" o "no {pending.id}" para confirmar o rechazar.'
+            f"Nueva fecha: {pending.label}\n"
+            f"Dirección: {pending.direccion}\n"
+            f"{nota_r}\n"
+            f'Responde "sí {pending.id}" o "no {pending.id}" para confirmar o rechazar, '
+            f'o "cambiar {pending.id} martes 10 am" para proponer otro horario.'
         )
     nota = f"{pending.nota}\n" if pending.nota else ""
     return (
@@ -367,10 +371,11 @@ async def _resolver_reagendo(ctx: AppContext, pending: PendingBooking) -> str:
         pending.conversation_id, pending.start_utc, pending.end_utc
     )
     await ctx.store.resolve_pending_booking(pending.id, "aprobado")
+    await _actualizar_caso(ctx, pending, confirmada=True)
     await _notificar_lead(
         ctx,
         pending,
-        f"¡Listo! Tu cita quedó movida para {pending.label}. 🪳✅",
+        f"¡Confirmado! ✅ Tu visita quedó reagendada para el {_sin_relativo(pending.label)}.",
     )
     return f"Listo, reagendo #{pending.id} confirmado y avisado al cliente ✅"
 
@@ -467,7 +472,17 @@ async def _actualizar_caso(ctx: AppContext, pending: PendingBooking, *, confirma
         if conv is None:
             return
         caso = dict(conv.caso or {})
-        if confirmada:
+        if pending.kind == "reagendar":
+            if confirmada:
+                cita = dict(caso.get("cita") or {})
+                cita.update(
+                    estado="confirmada",
+                    label=_sin_relativo(pending.label),
+                    start_utc=pending.start_utc.isoformat(),
+                )
+                caso["cita"] = cita
+            caso["cambio"] = None  # rechazado: la visita de antes sigue en pie
+        elif confirmada:
             cita = dict(caso.get("cita") or {})
             cita["estado"] = "confirmada"
             caso["cita"] = cita
@@ -509,7 +524,11 @@ async def _texto_rechazo_con_alternativas(ctx: AppContext, pending: PendingBooki
     reales y se guardan como ofrecidos: el cliente elige uno y el agente lo
     agenda sin tener que volver a proponer.
     """
-    base = "No tengo disponible ese horario 😔"
+    base = (
+        "Ese horario no nos fue posible 😔 Tu visita de antes sigue en pie."
+        if pending.kind == "reagendar"
+        else "No tengo disponible ese horario 😔"
+    )
     try:
         # Import local: app/tools.py importa este módulo a nivel de archivo.
         from app.tools import (
