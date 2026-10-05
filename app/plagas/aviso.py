@@ -84,7 +84,11 @@ async def avisar_al_dueno(
     destino = ctx.settings.aviso_dueno_identity
     if not destino or canonical_identity(identidad_lead) == destino:
         return False
-    if caso.cita and caso.cita.get("folio"):
+    if (
+        caso.cita
+        and caso.cita.get("folio")
+        and caso.cita.get("estado") != "confirmada"
+    ):
         # Ya se le mandó la solicitud con folio («sí N» / «no N»): no duplicar.
         return False
     nombre = str(((context or {}).get("contact") or {}).get("name") or "")
