@@ -218,6 +218,15 @@ class Settings(BaseSettings):
     # original nunca llegó.
     approval_reminder_reenviar: bool = False
 
+    # ── Plantillas de WhatsApp directo por Meta (recordatorio de visita) ──
+    # Token de un usuario del sistema con permiso sobre la cuenta de WhatsApp de
+    # ESTE número, y el id del número. Con las tres puestas se enciende el
+    # recordatorio al cliente 24 h antes (app/visit_reminders.py).
+    meta_wa_token: str = ""
+    meta_wa_phone_number_id: str = ""
+    meta_wa_template_recordatorio: str = ""
+    meta_wa_api_version: str = "v21.0"
+
     # Cada cuántos segundos, como mucho, se le vuelve a preguntar al CRM si
     # agenda (la bandera AGENDA de Vocero). Antes se preguntaba solo al
     # arrancar: encenderla exigía reiniciar Nea. La pregunta la hace el primer
@@ -373,6 +382,14 @@ class Settings(BaseSettings):
         """La identidad del dueño en la forma del CRM, o "" si no hay aviso."""
         crudo = self.aviso_dueno_wa.strip()
         return _identidad_de_lista(crudo) if crudo and not crudo.startswith("REEMPLAZA") else ""
+
+    @property
+    def recordatorios_activos(self) -> bool:
+        return bool(
+            self.meta_wa_token.strip()
+            and self.meta_wa_phone_number_id.strip()
+            and self.meta_wa_template_recordatorio.strip()
+        )
 
     @property
     def allowed_identities(self) -> frozenset[str]:

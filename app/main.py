@@ -21,6 +21,8 @@ from fastapi.responses import JSONResponse
 
 from app.agenda import SondaDeAgenda
 from app.booking_reminders import ApprovalReminderWorker
+from app.meta_wa import MetaWhatsApp
+from app.visit_reminders import VisitReminderWorker
 from app.coalesce import Coalescer
 from app.config import Settings
 from app.crm import CrmClient
@@ -278,6 +280,16 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
                 )
             )
             logger.info("agenda: Google Calendar + aprobación del dueño activos")
+        if c.calendar is not None and c.settings.recordatorios_activos:
+            c.meta = MetaWhatsApp(
+                token=c.settings.meta_wa_token.strip(),
+                phone_number_id=c.settings.meta_wa_phone_number_id.strip(),
+                api_version=c.settings.meta_wa_api_version,
+            )
+            workers.append(
+                asyncio.create_task(VisitReminderWorker(c).run(), name="visit-reminder-worker")
+            )
+            logger.info("recordatorios de visita al cliente activos (plantilla de Meta)")
         # El relay reenvía al CRM el payload crudo de Meta. En cloud el CRM YA
         # tiene el mensaje —él lo recibió y él nos lo despachó—, así que
         # reenviárselo sería duplicarlo en la bandeja del cliente.

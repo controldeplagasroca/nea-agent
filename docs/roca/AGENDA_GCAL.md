@@ -10,6 +10,7 @@ Nea se comporta como antes de este cambio (usa la agenda del CRM).
 | `BOOKING_REMINDER_MINUTES` (10) | Cada cuánto se revisa una solicitud sin resolver. |
 | `APPROVAL_REMINDER_REENVIAR` (false) | `true` = reenviar la solicitud en cada revisión aunque el dueño ya la tenga. |
 | `BOOKING_LEAD_HOURS` (24) | Anticipación mínima para ofrecer un horario. |
+| `META_WA_TOKEN`, `META_WA_PHONE_NUMBER_ID`, `META_WA_TEMPLATE_RECORDATORIO` | Con las tres (y el calendario) Nea manda al cliente, ~24 h antes de la visita y entre 10:00 y 20:00, la plantilla de Meta aprobada (`nea_recordatorio_visita`: nombre, plaga, fecha y hora, dirección). No se manda si la visita se agendó con menos de 24 h. Respeta `ALLOWED_WA_IDS`. El token es de un usuario del sistema con control sobre la cuenta de WhatsApp de ESE número y no se registra en logs. `META_WA_API_VERSION` (v21.0). |
 | `ROCA_OPS_SYNC_SECRET` | Secreto de `POST /roca-ops/sync` (ROCA OPS → ficha del CRM). Vacío = el endpoint responde 503. |
 
 ## Cómo fluye una visita
