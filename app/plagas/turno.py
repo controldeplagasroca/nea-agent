@@ -116,6 +116,14 @@ def herramienta_obligada(
     tiene que poder contestar lo que de verdad le dijeron.
     """
     if (
+        caso.contrapropuesta is not None
+        and not hostil
+        and es_afirmacion(texto_lead)
+        and len(texto_lead.split()) <= 6
+    ):
+        # «sí», «va, me queda bien»: aceptó el horario que se le sugirió.
+        return "responder_horario_sugerido"
+    if (
         caso.recurrente or caso.escalado or caso.cita is not None
         or hostil or candados.es_sonda(texto_lead) or candados.pide_persona(texto_lead)
     ):

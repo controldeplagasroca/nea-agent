@@ -61,6 +61,9 @@ class Caso:
     cambio: dict[str, Any] | None = None
     # Ya se le preguntó por qué cancela (una sola vez; después sí se cancela).
     cancelacion_preguntada: bool = False
+    # El técnico sugirió OTRO horario y el cliente tiene que contestar:
+    # {folio, label, start_utc, kind}. No hay nada agendado hasta que acepte.
+    contrapropuesta: dict[str, Any] | None = None
 
     @classmethod
     def desde(cls, crudo: Any) -> "Caso":
@@ -126,6 +129,21 @@ def paso_actual(caso: Caso, *, agenda: bool = True) -> Paso:
             f"comunico con {dueno}» y llama handoff con motivo \"cliente\" en ESTE turno.",
             "Pedir código postal, confirmar la plaga, explicar el tratamiento desde "
             "cero o cotizar: jamás se vuelve a cotizar lo que ya pagó.",
+        )
+
+    if caso.contrapropuesta is not None:
+        sugerido = caso.contrapropuesta.get("label")
+        return Paso(
+            "contrapropuesta",
+            f"El horario que pidió ya no estaba disponible y se le sugirió el {sugerido}; "
+            "espera su respuesta. Si lo ACEPTA (sí, va, ok, me queda bien…): llama "
+            "responder_horario_sugerido con acepta=true. Si no puede o propone otro día u "
+            "hora: llama responder_horario_sugerido con acepta=false y, con lo que te "
+            "devuelva, sigue (propose_slots, o cambiar_visita si ya tenía una visita "
+            f"confirmada). Si no queda claro, pregúntale en una línea si le queda bien el "
+            f"{sugerido}.",
+            "Decir que ya quedó agendada, ofrecer otros horarios por tu cuenta o "
+            "pasarlo con alguien antes de llamar responder_horario_sugerido.",
         )
 
     if caso.cambio is not None and caso.cita is not None:
@@ -379,6 +397,10 @@ def expediente(caso: Caso, *, agenda: bool = True) -> str:
         )
     if any(caso.direccion.values()):
         lineas.append(f"- Dirección que lleva dada: {caso.direccion_texto()}.")
+    if caso.contrapropuesta:
+        lineas.append(
+            f"- Se le sugirió {caso.contrapropuesta.get('label')} y falta que conteste."
+        )
     if caso.cambio:
         lineas.append(
             f"- Pidió mover la visita a {caso.cambio.get('label')} (pendiente del técnico)."

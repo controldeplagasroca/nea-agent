@@ -52,22 +52,26 @@ def _mocks(respx_mock):
     )
 
 
-async def test_el_dueno_sugiere_horario_se_agenda_y_el_cliente_recibe_confirmacion(ctx_con_dueno, respx_mock):
+async def test_el_dueno_sugiere_horario_y_se_le_pregunta_al_cliente_antes_de_agendar(ctx_con_dueno, respx_mock):
     ctx, conv = ctx_con_dueno
     pend = await _pendiente(ctx, conv)
     envio = _mocks(respx_mock)
 
     respuesta = await proponer_horario(ctx, pend, "cambiar 1 pasado manana 10 am")
 
-    assert "confirmada" in respuesta.lower()
-    inicio = ctx.calendar.booking_calls[0]["start_utc"]
+    assert "le propuse al cliente" in respuesta
+    assert ctx.calendar.booking_calls == []  # nada se agenda hasta que el cliente acepte
     tz = zona_agente(ctx.settings.agent_timezone)
+    nueva = (await ctx.store.get_pending_booking(pend.id))
     esperado = (datetime.now(tz) + timedelta(days=2)).date()
-    assert inicio.astimezone(tz).date() == esperado and inicio.astimezone(tz).hour == 10
-    assert (ctx.calendar.booking_calls[0]["end_utc"] - inicio) == (END - START)
+    assert nueva.start_utc.astimezone(tz).date() == esperado and nueva.start_utc.astimezone(tz).hour == 10
+    assert (nueva.end_utc - nueva.start_utc) == (END - START)
+    assert nueva.estado == "esperando_cliente"
     texto = json.loads(envio.calls[-1].request.content)["text"]
-    assert "quedó agendada" in texto and "10:00" in texto
-    assert (await ctx.store.get_pending_booking(pend.id)).estado == "aprobado"
+    assert "ya no tenemos disponible ese horario" in texto and "se van programando" in texto
+    assert "¿Te queda bien el" in texto and "10:00" in texto and "quedó agendada" not in texto
+    caso = (await ctx.store.get_conversation(conv.id)).caso
+    assert caso["contrapropuesta"]["folio"] == pend.id
 
 
 async def test_hora_sin_am_pm_de_la_tarde(ctx_con_dueno, respx_mock):
@@ -76,7 +80,7 @@ async def test_hora_sin_am_pm_de_la_tarde(ctx_con_dueno, respx_mock):
     _mocks(respx_mock)
     await proponer_horario(ctx, pend, "pasado manana a las 4")
     tz = zona_agente(ctx.settings.agent_timezone)
-    assert ctx.calendar.booking_calls[0]["start_utc"].astimezone(tz).hour == 16
+    assert (await ctx.store.get_pending_booking(pend.id)).start_utc.astimezone(tz).hour == 16
 
 
 async def test_horario_lleno_no_agenda_y_sigue_pendiente(ctx_con_dueno, respx_mock):

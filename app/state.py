@@ -331,6 +331,9 @@ class Store(Protocol):
     ) -> None:
         """El dueño sugirió otro horario: la solicitud pasa a ese día y hora."""
         ...
+    async def set_pending_estado(self, pending_id: int, estado: str) -> None:
+        """Cambia el estado sin resolverla (p. ej. «esperando_cliente»)."""
+        ...
 
     # cola de envíos pendientes (respuestas que no pudieron salir en el turno)
     async def enqueue_pending_send(
@@ -671,6 +674,11 @@ class MemoryStore(MemoryDispatchStore):
         if pending is not None:
             pending.estado = estado
             pending.resolved_at = utcnow()
+
+    async def set_pending_estado(self, pending_id: int, estado: str) -> None:
+        pending = self.pending_bookings.get(pending_id)
+        if pending is not None:
+            pending.estado = estado
 
     async def reagendar_pendiente(
         self, pending_id: int, start_utc: datetime, end_utc: datetime, label: str

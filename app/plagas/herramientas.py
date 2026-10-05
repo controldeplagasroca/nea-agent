@@ -31,6 +31,7 @@ from app import hostility
 
 from app.approvals import (
     _hora_24,
+    confirmar_en_linea,
     construir_description_evento,
     enviar_solicitud_aprobacion,
     next_reminder,
@@ -203,6 +204,24 @@ CAMBIAR_VISITA: dict[str, Any] = {
     },
 }
 
+RESPONDER_HORARIO_SUGERIDO: dict[str, Any] = {
+    "type": "function",
+    "function": {
+        "name": "responder_horario_sugerido",
+        "description": (
+            "Al cliente se le sugirió otro horario porque el que pidió ya no estaba "
+            "disponible. Llámala con su respuesta: acepta=true si lo acepta (el sistema "
+            "agenda y le confirma), acepta=false si no puede o propone otro (el sistema "
+            "libera la sugerencia y tú sigues con propose_slots o cambiar_visita)."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {"acepta": {"type": "boolean"}},
+            "required": ["acepta"],
+        },
+    },
+}
+
 _DIRECCION_PROPS = {
     "calle": {"type": "string"},
     "numero_exterior": {"type": "string"},
@@ -245,7 +264,7 @@ def esquemas(agenda: bool, aprobacion: bool) -> list[dict[str, Any]]:
             "lead ya haya dado: si falta alguno, te dice cuál pedir."
         )
         book["function"]["parameters"]["properties"].update(_DIRECCION_PROPS)
-        out += [propose, book, CAMBIAR_VISITA]
+        out += [propose, book, CAMBIAR_VISITA, RESPONDER_HORARIO_SUGERIDO]
     handoff = _esquema("handoff")
     handoff["function"]["parameters"]["properties"] = {
         "reason": {
@@ -326,6 +345,8 @@ class RuntimeDePlagas(ToolRuntime):
                 return await self._handoff_del_modelo(args)
             if name == "cambiar_visita":
                 return await self._cambiar_visita(args)
+            if name == "responder_horario_sugerido":
+                return await self._responder_horario_sugerido(args)
             if name in ("update_ficha", "route_out"):
                 # No se le enseñan al modelo en este vertical; si las inventa,
                 # se le dice qué sí existe en vez de fingir que funcionaron.
@@ -1292,6 +1313,76 @@ class RuntimeDePlagas(ToolRuntime):
         if str(args.get("accion") or "").strip().lower() == "cancelar":
             return await self._cancelar_visita(args)
         return await self._reagendar_visita(args)
+
+    async def _responder_horario_sugerido(self, args: dict[str, Any]) -> dict[str, Any]:
+        """El cliente contesta el horario que sugirió el técnico (acepta, o no puede)."""
+        ctx, caso = self._ctx, self.caso
+        sug = caso.contrapropuesta
+        pending = await ctx.store.get_pending_booking(int(sug["folio"])) if sug else None
+        if pending is None or pending.estado != "esperando_cliente":
+            caso.contrapropuesta = None
+            return {
+                "ok": False,
+                "error": "sin_sugerencia",
+                "instrucciones": "No hay un horario sugerido esperando respuesta: sigue el PASO ACTUAL.",
+            }
+        cuando = str(sug.get("label") or "")
+        destino = ctx.settings.aviso_dueno_identity or ctx.settings.owner_identity
+        quien = self._nombre_lead or "El cliente"
+        if args.get("acepta") is True:
+            para_el_dueno, texto_cliente = await confirmar_en_linea(ctx, pending)
+            confirmado = (await ctx.store.get_pending_booking(pending.id)).estado == "aprobado"
+            if destino:
+                await _enviar_al_dueno(
+                    ctx, destino,
+                    f"✅ {quien} aceptó el {cuando} (#{pending.id}). {para_el_dueno}",
+                )
+            caso.contrapropuesta = None
+            if confirmado:
+                caso.cita = {
+                    **(caso.cita or {}),
+                    "label": cuando,
+                    "start_utc": pending.start_utc.isoformat(),
+                    "estado": "confirmada",
+                    "folio": pending.id,
+                }
+                caso.cambio = None
+                self.texto_garantizado = texto_cliente or (
+                    f"¡Confirmado! ✅ Tu visita quedó agendada para el {cuando}."
+                )
+            else:
+                # El calendario no pudo reservar: no se le dice que quedó agendada.
+                self.texto_garantizado = (
+                    "Anoté que ese horario te queda bien 🙏 Lo estamos terminando de "
+                    "confirmar y te avisamos por aquí en un momento."
+                )
+            return {
+                "ok": True,
+                "estado": "aceptada" if confirmado else "por_confirmar",
+                "instrucciones": "Ya se le envió al lead el mensaje. No agregues nada.",
+            }
+        await ctx.store.resolve_pending_booking(pending.id, "rechazado")
+        caso.contrapropuesta = None
+        if destino:
+            await _enviar_al_dueno(
+                ctx, destino,
+                f"ℹ️ {quien} no puede el {cuando} (#{pending.id}); está proponiendo otro horario.",
+            )
+        if pending.kind == "reagendar":
+            caso.cambio = None
+            siguiente = (
+                "Su visita de antes sigue en pie. Si propone otro día u hora, llama "
+                "cambiar_visita con accion reagendar; si ya no quiere moverla, díselo."
+            )
+        else:
+            caso.cita = None
+            caso.escalado = ""
+            siguiente = (
+                "Ya no hay horario apartado. Si dijo un día u hora, llama propose_slots "
+                "(con esa fecha) y ofrécele los que sí estén libres; si no, pregúntale "
+                "qué día y hora le acomodan."
+            )
+        return {"ok": True, "estado": "rechazada", "instrucciones": siguiente}
 
     def _horario_pedido(self, args: dict[str, Any], tz: Any, hoy: date) -> tuple[date | None, tuple[int, int] | None]:
         """Día y hora que pidió el cliente: de sus palabras primero, de lo que
