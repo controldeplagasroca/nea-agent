@@ -107,8 +107,9 @@ class CalendarBooking:
     service_key: str
     start_utc: datetime
     end_utc: datetime
+    # Cuándo se fijó el horario vigente (se renueva al reagendar).
     created_at: datetime = field(default_factory=utcnow)
-
+    recordatorio_enviado_at: datetime | None = None
 
 
 @dataclass
@@ -282,6 +283,12 @@ class Store(Protocol):
         self, conversation_id: int, start_utc: datetime, end_utc: datetime
     ) -> None: ...
     async def cancel_calendar_booking(self, conversation_id: int) -> None: ...
+    async def list_bookings_for_visit_reminder(
+        self, empiezan_antes_de: datetime
+    ) -> list[CalendarBooking]:
+        """Citas activas sin recordatorio que empiezan antes de ese momento."""
+        ...
+    async def mark_visit_reminder_sent(self, booking_id: int) -> None: ...
 
     # aprobación del dueño antes de reservar (candado de negocio)
     async def create_pending_booking(
@@ -565,9 +572,25 @@ class MemoryStore(MemoryDispatchStore):
         if booking is not None:
             booking.start_utc = start_utc
             booking.end_utc = end_utc
+            booking.created_at = utcnow()
+            booking.recordatorio_enviado_at = None
 
     async def cancel_calendar_booking(self, conversation_id: int) -> None:
         self.calendar_bookings.pop(conversation_id, None)
+
+    async def list_bookings_for_visit_reminder(
+        self, empiezan_antes_de: datetime
+    ) -> list[CalendarBooking]:
+        return [
+            b
+            for b in self.calendar_bookings.values()
+            if b.recordatorio_enviado_at is None and b.start_utc <= empiezan_antes_de
+        ]
+
+    async def mark_visit_reminder_sent(self, booking_id: int) -> None:
+        for b in self.calendar_bookings.values():
+            if b.id == booking_id:
+                b.recordatorio_enviado_at = utcnow()
 
     async def create_pending_booking(
         self,
@@ -746,6 +769,8 @@ class AppContext:
     paros_avisados: dict[str, datetime] = field(default_factory=dict)
     # Agenda propia (Google Calendar) o None si no está configurada.
     calendar: Any = None  # GoogleCalendarClient / NullCalendarClient (app/gcal.py)
+    # Plantillas de WhatsApp directo por Meta (app/meta_wa.py); None = sin configurar.
+    meta: Any = None
     relay_wake: asyncio.Event = field(default_factory=asyncio.Event)
     dispatch_wake: asyncio.Event = field(default_factory=asyncio.Event)
     # ¿El CRM de esta instancia tiene motor de agenda? Vocero lo trae detrás de

@@ -152,6 +152,7 @@ def _booking_from_row(row: Any) -> CalendarBooking:
         start_utc=row["start_utc"],
         end_utc=row["end_utc"],
         created_at=row["created_at"],
+        recordatorio_enviado_at=row.get("recordatorio_enviado_at"),
     )
 
 
@@ -509,12 +510,34 @@ class PgStore(PgDispatchStore):
     ) -> None:
         await self.pool.execute(
             """
-            UPDATE calendar_bookings SET start_utc = $2, end_utc = $3
+            UPDATE calendar_bookings
+            SET start_utc = $2, end_utc = $3, created_at = now(),
+                recordatorio_enviado_at = NULL
             WHERE conversation_id = $1 AND canceled_at IS NULL
             """,
             conversation_id,
             start_utc,
             end_utc,
+        )
+
+    async def list_bookings_for_visit_reminder(
+        self, empiezan_antes_de: datetime
+    ) -> list[CalendarBooking]:
+        rows = await self.pool.fetch(
+            """
+            SELECT * FROM calendar_bookings
+            WHERE canceled_at IS NULL AND recordatorio_enviado_at IS NULL
+              AND start_utc <= $1
+            ORDER BY start_utc
+            """,
+            empiezan_antes_de,
+        )
+        return [_booking_from_row(r) for r in rows]
+
+    async def mark_visit_reminder_sent(self, booking_id: int) -> None:
+        await self.pool.execute(
+            "UPDATE calendar_bookings SET recordatorio_enviado_at = now() WHERE id = $1",
+            booking_id,
         )
 
     async def cancel_calendar_booking(self, conversation_id: int) -> None:
