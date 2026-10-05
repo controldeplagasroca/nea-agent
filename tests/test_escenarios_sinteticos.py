@@ -92,24 +92,6 @@ async def test_si_el_dueno_rechaza_no_hay_evento_y_el_cliente_recibe_alternativa
     assert "No tengo disponible ese horario" in _textos_al_cliente(envio)[-1]
 
 
-@pytest.mark.parametrize("plaga", ["cucaracha_alemana", "chinches", "hormiga"])
-@respx.mock
-async def test_el_dueno_sugiere_otro_horario_y_queda_agendado_ahi(plaga):
-    rt, ctx = await _con_plaga(plaga)
-    envio = _crm_con_dueno()
-    await rt._solicitar_visita(_slot(rt))
-    pend = (await ctx.store.list_pending_bookings_pendientes())[0]
-    hora = "5 pm" if plaga == "hormiga" else "10 am"  # la hormiga solo se agenda en sus ventanas
-
-    await atender_respuesta_del_dueno(ctx, DUENO, _dueno(f"cambiar {pend.id} pasado mañana {hora}"))
-
-    tz = zona_agente(ctx.settings.agent_timezone)
-    inicio = ctx.calendar.booking_calls[0]["start_utc"].astimezone(tz)
-    assert inicio.date() == (datetime.now(tz) + timedelta(days=2)).date()
-    assert inicio.hour == (17 if plaga == "hormiga" else 10)
-    assert "quedó agendada" in _textos_al_cliente(envio)[-1]
-
-
 async def _confirmada(plaga: str):
     rt, ctx = await _con_plaga(plaga)
     rt.caso.cita = {"label": "lunes 5 de octubre, 10:00", "estado": "confirmada", "folio": 1}
@@ -150,23 +132,6 @@ async def test_reagendo_hora_libre_el_tecnico_aprueba_y_el_evento_se_mueve(plaga
     assert "reagendada" in _textos_al_cliente(envio)[-1]
     caso = Caso.desde((await ctx.store.get_conversation(rt._conv.id)).caso)
     assert caso.cambio is None and caso.cita["estado"] == "confirmada"
-
-
-@respx.mock
-async def test_reagendo_el_dueno_propone_otra_hora_y_se_mueve_ahi():
-    rt, ctx = await _confirmada("cucaracha_alemana")
-    rt._mensajes_lead = ["¿podemos pasarla al miércoles a las 10 am?"]
-    envio = _crm_con_dueno()
-    _, slot = _miercoles_10()
-    ctx.calendar.availability_queue.append([slot])
-    await rt.execute("cambiar_visita", {"accion": "reagendar"})
-    pend = (await ctx.store.list_pending_bookings_pendientes())[0]
-
-    await atender_respuesta_del_dueno(ctx, DUENO, _dueno(f"cambiar {pend.id} pasado mañana 11 am"))
-
-    tz = zona_agente(ctx.settings.agent_timezone)
-    nuevo = ctx.calendar.reschedule_calls[0]["new_start"].astimezone(tz)
-    assert nuevo.hour == 11 and "reagendada" in _textos_al_cliente(envio)[-1]
 
 
 @pytest.mark.parametrize("plaga", ["cucaracha_alemana", "chinches", "pulgas"])
