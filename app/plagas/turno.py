@@ -14,6 +14,7 @@ from typing import Any, Awaitable, Callable
 from app.llm import LlmExhausted
 from app.plagas import candados, catalogo, precios
 from app.plagas.caso import Caso, paso_actual
+from app.plagas.direccion import direccion_dicha
 from app.plagas.cobertura import extraer_cp
 from app.plagas.herramientas import RuntimeDePlagas
 from app.plagas.texto import es_afirmacion, normalizar
@@ -62,6 +63,11 @@ def abrir_caso(conv: Any, context: dict[str, Any] | None, texto_lead: str) -> Ca
 
     if candados.es_sonda(texto_lead):
         caso.sondas += 1
+    # La dirección que el cliente ya escribió se guarda aquí, sin depender de que el
+    # modelo se acuerde de pasarla: lo dicho antes no se vuelve a pedir.
+    for campo, valor in direccion_dicha(texto_lead).items():
+        if not str(caso.direccion.get(campo) or "").strip():
+            caso.direccion[campo] = valor[:160]
     return caso
 
 
