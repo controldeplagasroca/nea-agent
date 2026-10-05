@@ -221,3 +221,17 @@ def test_alemana_explica_que_se_rompe_el_ciclo_reproductivo():
 
     texto = bloque_de_tratamiento("cucaracha_alemana")
     assert "ciclo reproductivo" in texto and "recién nacidos" in texto and "edad reproductiva" in texto
+
+
+def test_los_textos_del_catalogo_son_concisos():
+    """4 oct: respuestas de 300 a 600 caracteres; el tope solo si hace falta."""
+    from app.plagas import catalogo
+    from app.plagas.herramientas import bloque_de_tratamiento
+
+    assert len(catalogo.INTRO_CUCARACHAS) <= 500
+    assert len(catalogo.TARJETA_CUCARACHAS) <= 600
+    for clave in catalogo.DUDAS:
+        assert len(catalogo.DUDAS[clave]) <= 400, clave
+    for plaga, info in catalogo.PLAGAS.items():
+        if "visitas" in info:
+            assert len(bloque_de_tratamiento(plaga)) <= 600, plaga

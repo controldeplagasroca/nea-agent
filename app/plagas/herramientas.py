@@ -61,7 +61,7 @@ MAX_FRASE_DE_CONFIRMACION = 190
 # El mensaje que confirma la plaga es el único del modelo que puede pasar del
 # tope normal: lleva debajo la tranquilidad, el tratamiento y las visitas, y el
 # dueño pidió que ese momento se explique completo («yo sí lo doy a detalle»).
-TOPE_DE_CONFIRMACION = 900
+TOPE_DE_CONFIRMACION = 640
 
 # Cucarachas: tras las preguntas de tamaño, lugar y comportamiento, primer atasco:
 # tarjeta comparativa (repetirla era un bucle — sección 15 de la especificación).

@@ -146,19 +146,13 @@ PREGUNTA_CUCARACHA_TAMANO = (
 # las dos especies comunes (texto del profesor, 4 oct) y se le pide que cuente
 # cuál ha visto y dónde. Las dos preguntas del final reemplazan a «¿de qué tamaño?».
 INTRO_CUCARACHAS = (
-    "Para darte el tratamiento más efectivo y el costo exacto 🎯, necesito saber qué "
-    "tipo de cucaracha tienes. Hay dos especies comunes, con comportamientos distintos 🪳\n\n"
-    "1️⃣ *Cucaracha de cocina (alemana)* 🏠\n"
-    "• Pequeña (1 a 2 cm), café claro con dos rayitas negras 🤏\n"
-    "• Se ve debajo de la tarja, el refrigerador o el microondas, y dentro de gabinetes "
-    "o electrodomésticos 🧽\n"
-    "• Suele tener más actividad de noche 🌙\n\n"
-    "2️⃣ *Cucaracha de alcantarilla (americana)* 🌧️\n"
-    "• Grande (4 a 5 cm), café rojizo oscuro 🚀\n"
-    "• Se ve en patios, coladeras y registros, cerca de tuberías o en sótanos 🚪\n"
-    "• También suele salir de noche 🌙\n\n"
-    "📌 Cuéntame: ¿cuál de las dos has visto?, ¿dónde y cómo son? Y ¿las encuentras más "
-    "adentro de casa o en el exterior? 🔍"
+    "Para darte el tratamiento y el costo exactos 🎯 necesito saber qué cucaracha tienes. "
+    "Hay dos comunes 🪳\n\n"
+    "1️⃣ *De cocina (alemana)* 🏠: chica (1 a 2 cm), café claro con dos rayitas negras. "
+    "Sale bajo la tarja, el refri o en gabinetes, sobre todo de noche 🌙\n"
+    "2️⃣ *De drenaje (americana)* 🌧️: grande (4 a 5 cm), café rojizo oscuro. Sale en "
+    "patios, coladeras y registros 🚪\n\n"
+    "📌 ¿Cuál has visto y dónde? ¿Más dentro de casa o afuera? 🔍"
 )
 # Pregunta con pistas concretas, no «¿en la cocina o en el drenaje?»: quien ya dijo
 # «de la cocina» no debe sentir que se le repite, y lo que contesta confirma.
@@ -197,11 +191,10 @@ PLAGAS: dict[str, dict[str, Any]] = {
         ),
         "visitas": "2 visitas (entre 8 y 10 días entre una y otra)",
         "resumen": (
-            "No es una aspersión general: el técnico aplica un cebo en polvo fino en "
-            "huecos y grietas, en las zonas de refugio que ya sabe identificar 🔍. Es como "
-            "una vacuna de dos dosis 💉: la 1ª visita elimina a los adultos 🪳 y la 2ª "
-            "ataca a los recién nacidos y jóvenes 🐣 antes de que lleguen a la edad "
-            "reproductiva. Así se rompe el ciclo reproductivo 🔄 y se logra el control 📉."
+            "No es una aspersión general: el técnico aplica un cebo en polvo fino en huecos "
+            "y grietas, en las zonas de refugio que ya sabe identificar 🔍. Son dos dosis 💉: la 1ª "
+            "elimina a los adultos 🪳 y la 2ª ataca a los recién nacidos 🐣 antes de su edad "
+            "reproductiva, rompiendo el ciclo reproductivo 🔄."
         ),
         "procedimiento": (
             "Tras una inspección el técnico aplica un cebo en polvo fino en huecos y "
@@ -212,8 +205,7 @@ PLAGAS: dict[str, dict[str, Any]] = {
         ),
         "contencion": (
             "Antes y entre visitas, no uses aerosol ni remedios caseros 🚫. No limpies "
-            "las zonas tratadas durante 24 horas y mantén los alimentos cubiertos "
-            "durante la aplicación 🍞."
+            "las zonas tratadas por 24 horas y cubre los alimentos 🍞."
         ),
         "precio": {
             "tipo": "por_inmueble",
@@ -228,12 +220,10 @@ PLAGAS: dict[str, dict[str, Any]] = {
         "expectativa": "control sostenido (no es permanente)",
         "visitas": "2 visitas (la segunda a los 15 días)",
         "resumen": (
-            "Se trata el drenaje por pasos 🔧: aplicación en caídas de agua y pluviales "
-            "☔ para crear una barrera descendente, nebulización con producto "
-            "profesional dentro de ductos y cañerías 🌀, y apertura de registros y "
-            "coladeras de planta baja 🔍 para aplicar directo donde hay más actividad. "
-            "Se trabaja en dirección contraria a su entrada ⬆️, para forzarlas a salir "
-            "por donde llegaron. La 2ª visita sostiene el control ✅."
+            "Tratamos el drenaje por pasos 🔧: caídas de agua y pluviales ☔ (barrera "
+            "descendente), nebulización dentro de ductos 🌀 y registros de planta baja 🔍, "
+            "trabajando contra su entrada para sacarlas por donde llegaron ⬆️. La 2ª "
+            "visita sostiene el control ✅."
         ),
         "procedimiento": (
             "1) Aplicación en caídas de agua y pluviales, desde la parte superior del "
@@ -485,12 +475,10 @@ PLAGAS: dict[str, dict[str, Any]] = {
         "expectativa": "erradicación",
         "visitas": "2 visitas en el 95% de los casos (una 3ª solo si la infestación es alta)",
         "resumen": (
-            "Primero una inspección 🔍 de los sitios donde se refugian (base de cama, "
-            "colchón, cabecera, closets). Luego vapor de agua a alta temperatura ♨️ en las "
-            "6 caras de cada colchón, base y cabecera para eliminar por calor a los "
-            "insectos presentes, y una aspersión líquida 💧 en esos mismos sitios que, al "
-            "secar, deja una capa protectora 🛡️. Sillones y sillas se tratan solo con "
-            "líquido, por el textil."
+            "Inspección 🔍 de refugios (cama, colchón, cabecera, closets), vapor de agua a "
+            "alta temperatura ♨️ para eliminar por calor a las presentes, y aspersión "
+            "líquida 💧 que al secar deja una capa protectora 🛡️. Sillones y sillas, solo "
+            "con líquido."
         ),
         "procedimiento": (
             "Inspección de los sitios de refugio; vapor y calor focalizado en las 6 "
@@ -711,20 +699,18 @@ DUDAS: dict[str, str] = {
     # Mascotas (texto del profesor para chinches, 4 oct). Sin cifras de dosis letal
     # ni «100 % seguro»: la indicación de un caso particular la confirma un técnico.
     "mascotas": (
-        "El producto es de bajo riesgo para personas y animales en las condiciones de "
-        "aplicación 🐾; no hace falta desalojar el domicilio. Por precaución se pide "
-        "mantener a las mascotas alejadas del área tratada mientras se seca el producto."
+        "Es de bajo riesgo para personas y animales en las condiciones de aplicación 🐾; "
+        "no hay que desalojar. Por precaución, mantén a las mascotas lejos del área "
+        "tratada mientras seca."
     ),
     # Edificios y áreas comunes (texto del profesor, 4 oct). El reingreso es el
     # aprobado (15 a 20 min), no los 10 minutos del texto original.
     "edificios": (
-        "La aplicación es focalizada 🎯 en áreas comunes (escaleras, estacionamiento, "
-        "pasillos, azotea) y en drenajes y coladeras de planta baja, con productos "
-        "autorizados por la Secretaría de Salud para el control urbano de plagas ✅, por "
-        "lo que no representa un riesgo para la salud de los habitantes. Con las "
-        "mascotas 🐕🐈: que estén dentro del domicilio durante la aplicación y esperar de "
-        "15 a 20 minutos después de terminada para transitar por las áreas tratadas. "
-        "Se atienden arañas 🕷️, alacranes 🦂, cucaracha de drenaje 🪳 y roedores 🐭."
+        "Aplicación focalizada 🎯 en áreas comunes (escaleras, estacionamiento, pasillos, "
+        "azotea) y en coladeras de planta baja, con productos autorizados por la "
+        "Secretaría de Salud ✅; sin riesgo para los habitantes. Mascotas 🐕🐈: dentro de "
+        "casa durante la aplicación y esperar 15 a 20 minutos para transitar por las áreas "
+        "tratadas. Atendemos arañas 🕷️, alacranes 🦂, cucaracha de drenaje 🪳 y roedores 🐭."
     ),
 }
 # El único tiempo de reingreso aprobado, en minutos (el candado rechaza otro).
