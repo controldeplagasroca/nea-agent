@@ -249,7 +249,14 @@ def _cucaracha(d: Diagnostico, preguntadas: list[str]) -> Diagnostico:
     # La comparación simple: primero tamaño, luego ubicación; cada una se
     # pregunta UNA vez. El baño no distingue, así que tiene su repregunta.
     if not hay_tamano and "tamano" not in preguntadas:
-        d.pregunta, d.senal_preguntada = catalogo.PREGUNTA_CUCARACHA_TAMANO, "tamano"
+        # Sin ninguna pista (solo dijo «cucarachas»): se le presentan las dos especies.
+        # Con alguna pista de lugar, basta preguntar el tamaño.
+        d.pregunta = (
+            catalogo.PREGUNTA_CUCARACHA_TAMANO
+            if hay_ubicacion or d.senales
+            else catalogo.INTRO_CUCARACHAS
+        )
+        d.senal_preguntada = "tamano"
     elif not hay_ubicacion and "ubicacion" not in preguntadas:
         d.pregunta, d.senal_preguntada = catalogo.PREGUNTA_CUCARACHA_UBICACION, "ubicacion"
     elif (
