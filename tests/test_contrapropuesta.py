@@ -85,7 +85,7 @@ async def test_reagendo_con_sugerencia_del_dueno_acepta_y_el_evento_se_mueve():
     envio = _crm_con_dueno()
     _, slot = _miercoles_10()
     ctx.calendar.availability_queue.append([slot])
-    await rt.execute("cambiar_visita", {"accion": "reagendar"})
+    await rt.execute("cambiar_visita", {"accion": "reagendar", "motivo": "imprevisto"})
     await ctx.store.update_conversation(rt._conv.id, caso=rt.caso.a_dict())
     pend = (await ctx.store.list_pending_bookings_pendientes())[0]
     await atender_respuesta_del_dueno(ctx, DUENO, _dueno(f"cambiar {pend.id} pasado mañana 11 am"))
@@ -107,7 +107,7 @@ async def test_reagendo_con_sugerencia_rechazada_deja_la_visita_de_antes():
     _crm_con_dueno()
     _, slot = _miercoles_10()
     ctx.calendar.availability_queue.append([slot])
-    await rt.execute("cambiar_visita", {"accion": "reagendar"})
+    await rt.execute("cambiar_visita", {"accion": "reagendar", "motivo": "imprevisto"})
     await ctx.store.update_conversation(rt._conv.id, caso=rt.caso.a_dict())
     pend = (await ctx.store.list_pending_bookings_pendientes())[0]
     await atender_respuesta_del_dueno(ctx, DUENO, _dueno(f"cambiar {pend.id} pasado mañana 11 am"))

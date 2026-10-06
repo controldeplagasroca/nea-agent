@@ -170,7 +170,7 @@ def paso_actual(caso: Caso, *, agenda: bool = True) -> Paso:
             "quiere CANCELAR: llama cambiar_visita con accion \"cancelar\"; el "
             "sistema le pregunta por qué con amabilidad y le ofrece reagendar. Cuando "
             "ya contestó y sigue queriendo cancelar, llámala otra vez con su motivo y "
-            "confirmado=true. Si dice que va a verificar su fecha, respétalo («sin "
+            "confirmado=true. Si responde «Enterado» (al recordatorio), agradécele en una línea y no preguntes nada. Si pide un cambio, siempre se le pregunta el motivo antes. Si dice que va a verificar su fecha, respétalo («sin "
             "problema, aquí estaré») y no insistas.",
             "Decir «solicitud», «pendiente» o que alguien tiene que autorizarla. Pasarlo "
             "con alguien por un cambio o cancelación (se hace con cambiar_visita). "
