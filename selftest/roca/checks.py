@@ -15,6 +15,7 @@ import re
 from typing import Any
 
 from app.plagas import candados
+from app.plagas.texto import normalizar, palabras
 
 LARGO_MAXIMO = candados.MAX_CARACTERES
 _HORA = re.compile(r"\b([01]?\d|2[0-3]):[0-5]\d\b")
@@ -34,6 +35,77 @@ def es_texto_del_servidor(texto: str) -> bool:
 
 def _busca(patron: str, texto: str) -> bool:
     return bool(re.search(patron, texto, re.I))
+
+
+_PREGUNTA = re.compile(r"¿[^?]*\?")
+_PIDE_DIRECCION = (
+    ("calle", re.compile(r"\bcalle\b|\bdirecci[oó]n completa\b|\btu direcci[oó]n\b", re.I)),
+    ("colonia", re.compile(r"\bcolonia\b|\bdirecci[oó]n completa\b|\btu direcci[oó]n\b", re.I)),
+    ("alcaldia_municipio", re.compile(r"\balcald[ií]a\b|\bmunicipio\b|\bdirecci[oó]n completa\b|\btu direcci[oó]n\b", re.I)),
+)
+_PIDE_INMUEBLE = re.compile(r"casa,? (o )?(un )?departamento|departamento,? (o )?(una )?casa", re.I)
+_PIDE_MUEBLES = {
+    "colchones": re.compile(r"\bcu[aá]ntos colchones\b|\bcolchones\b.*\bhay\b", re.I),
+    "sillones": re.compile(r"\bcu[aá]ntos sillones\b", re.I),
+    "sillas_secretariales": re.compile(r"\bsillas secretariales\b", re.I),
+}
+
+
+def _preguntas(texto: str) -> list[str]:
+    return [p.strip() for p in _PREGUNTA.findall(texto or "")]
+
+
+def _parecidas(a: str, b: str) -> bool:
+    pa, pb = set(palabras(a)), set(palabras(b))
+    return len(pa) >= 4 and len(pb) >= 4 and len(pa & pb) / max(len(pa), len(pb)) >= 0.7
+
+
+def repreguntas(res: dict[str, Any]) -> list[str]:
+    """Lo que el cliente ya dijo no se le vuelve a preguntar (4 oct, caso Ethel).
+
+    - `pregunta_repetida`: el bot hace una pregunta casi igual a una que ya hizo.
+    - `repregunta_dato_dicho`: el bot pide la dirección, el tipo de inmueble o los
+      muebles que el cliente ya había escrito (hasta ese mismo turno).
+    """
+    # Import local: herramientas importa media aplicación.
+    from app.plagas.direccion import direccion_dicha
+    from app.plagas.herramientas import _DICE_INMUEBLE
+    from app.plagas.muebles import muebles_dichos
+
+    fallas: list[str] = []
+    antes: list[str] = []
+    dicho: list[str] = []
+    for n, t in enumerate(res["turnos"], 1):
+        dicho += [str(l) for l in t["lead"] if isinstance(l, str)]
+        texto = t.get("bot") or ""
+        if not texto or es_texto_del_servidor(texto):
+            continue
+        preguntas = _preguntas(texto)
+        for q in preguntas:
+            if any(_parecidas(q, previa) for previa in antes):
+                fallas.append(f"pregunta_repetida: turno {n} («{q[:70]}»)")
+        antes += preguntas
+        if not preguntas:
+            continue
+        pregunta = " ".join(preguntas)
+        direccion: dict[str, str] = {}
+        for mensaje in dicho:
+            for campo, valor in direccion_dicha(mensaje).items():
+                direccion.setdefault(campo, valor)
+        for campo, patron in _PIDE_DIRECCION:
+            if campo in direccion and patron.search(pregunta):
+                fallas.append(f"repregunta_dato_dicho: turno {n} pide {campo} y ya lo dijo")
+                break
+        plano = [normalizar(m) for m in dicho]
+        if _PIDE_INMUEBLE.search(pregunta) and any(
+            re.search(p, m) for ps in _DICE_INMUEBLE.values() for p in ps for m in plano
+        ):
+            fallas.append(f"repregunta_dato_dicho: turno {n} pregunta el tipo de inmueble y ya lo dijo")
+        muebles = muebles_dichos(dicho)
+        for clave, patron in _PIDE_MUEBLES.items():
+            if clave in muebles and patron.search(pregunta):
+                fallas.append(f"repregunta_dato_dicho: turno {n} pregunta {clave} y ya lo dijo")
+    return fallas
 
 
 def universales(res: dict[str, Any], espera: dict[str, Any]) -> list[str]:
@@ -121,6 +193,8 @@ def universales(res: dict[str, Any], espera: dict[str, Any]) -> list[str]:
             )
         ):
             confirmada = True
+    if res.get("modo") == "vertical":
+        fallas += repreguntas(res)
     for t in res["turnos"]:
         if t.get("error"):
             fallas.append(f"error_del_turno: {t['error'][:120]}")

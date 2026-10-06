@@ -66,7 +66,7 @@ async def test_hora_ocupada_no_registra_nada_y_pide_ofrecer_las_libres():
     _crm_falso()
     _, slot = _dia_libre(hora_utc=17)  # solo hay 11:00
     ctx.calendar.availability_queue.append([slot])
-    res = await rt.execute("cambiar_visita", {"accion": "reagendar"})
+    res = await rt.execute("cambiar_visita", {"accion": "reagendar", "motivo": "imprevisto"})
     assert res["ok"] is True and "NO está libre" in res["instrucciones"] and "11:00" in res["instrucciones"]
     assert await ctx.store.list_pending_bookings_pendientes() == []
     assert rt.texto_garantizado is None and rt.caso.cambio is None
@@ -74,7 +74,7 @@ async def test_hora_ocupada_no_registra_nada_y_pide_ofrecer_las_libres():
 
 async def test_sin_dia_u_hora_pregunta():
     rt, ctx = await _con_visita_confirmada("quiero cambiarla")
-    res = await rt.execute("cambiar_visita", {"accion": "reagendar"})
+    res = await rt.execute("cambiar_visita", {"accion": "reagendar", "motivo": "imprevisto"})
     assert res["error"] == "falta_dia_u_hora"
 
 
@@ -84,7 +84,7 @@ async def test_al_aprobar_el_cambio_se_mueve_el_evento_y_el_cliente_recibe_reage
     envio = _crm_falso()
     inicio, slot = _dia_libre()
     ctx.calendar.availability_queue.append([slot])
-    await rt.execute("cambiar_visita", {"accion": "reagendar"})
+    await rt.execute("cambiar_visita", {"accion": "reagendar", "motivo": "imprevisto"})
     await ctx.store.update_conversation(rt._conv.id, caso=rt.caso.a_dict())
     pend = (await ctx.store.list_pending_bookings_pendientes())[0]
 
@@ -104,7 +104,7 @@ async def test_si_el_tecnico_rechaza_el_cambio_la_visita_de_antes_sigue_en_pie()
     envio = _crm_falso()
     _, slot = _dia_libre()
     ctx.calendar.availability_queue.append([slot])
-    await rt.execute("cambiar_visita", {"accion": "reagendar"})
+    await rt.execute("cambiar_visita", {"accion": "reagendar", "motivo": "imprevisto"})
     await ctx.store.update_conversation(rt._conv.id, caso=rt.caso.a_dict())
     pend = (await ctx.store.list_pending_bookings_pendientes())[0]
 
@@ -153,3 +153,10 @@ async def test_un_pase_con_visita_confirmada_si_avisa_al_dueno():
         ctx, identidad_lead=IDENTITY, context=None, caso=rt.caso, motivo="cliente"
     )
     assert enviado is True and envio.call_count == 1
+
+
+async def test_reagendar_una_visita_confirmada_sin_motivo_primero_lo_pregunta():
+    rt, ctx = await _con_visita_confirmada("quiero cambiarla al miercoles a las 10 am")
+    res = await rt.execute("cambiar_visita", {"accion": "reagendar"})
+    assert res["error"] == "falta_motivo" and "motivo" in res["instrucciones"]
+    assert await ctx.store.list_pending_bookings_pendientes() == []

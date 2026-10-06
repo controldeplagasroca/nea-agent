@@ -1416,6 +1416,18 @@ class RuntimeDePlagas(ToolRuntime):
                 self._puente(),
             )
             return {"ok": True, "estado": "con_el_dueno", "instrucciones": "Ya se le avisó. No agregues nada."}
+        if caso.cita.get("estado") == "confirmada" and not str(args.get("motivo") or "").strip():
+            # Una visita ya aceptada no se mueve sin saber por qué (5 oct): se pregunta
+            # con amabilidad y, con su respuesta, se vuelve a llamar con el motivo.
+            return {
+                "ok": False,
+                "error": "falta_motivo",
+                "instrucciones": (
+                    "Antes de moverla, pregúntale con mucha amabilidad, en UNA línea, el "
+                    "motivo del cambio (si ya lo dijo, mándalo en `motivo`). Con su "
+                    "respuesta vuelve a llamar cambiar_visita incluyendo el motivo."
+                ),
+            }
         tz = _zona_del_negocio(ctx)
         hoy = datetime.now(tz).date()
         fecha, hm = self._horario_pedido(args, tz, hoy)
