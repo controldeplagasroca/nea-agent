@@ -20,7 +20,7 @@ from typing import Any
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 
-from app.approvals import proponer_horario, resolver_aprobacion
+from app.approvals import _aviso_en_linea, proponer_horario, resolver_aprobacion
 from app.gcal import SERVICE_RULES
 from app.state import PendingBooking
 
@@ -92,13 +92,29 @@ async def resolver_cita(cita_id: int, request: Request) -> JSONResponse:
             {"error": "ya_resuelta", "estado": pending.estado}, status_code=409
         )
 
-    if accion == "proponer":
-        texto = str((cuerpo or {}).get("texto") or "").strip()
-        if not texto:
-            return JSONResponse({"error": "texto requerido (ej. «jueves 10 am»)"}, status_code=400)
-        mensaje = await proponer_horario(ctx, pending, texto)
-    else:
-        mensaje = await resolver_aprobacion(ctx, pending, accion == "aprobar")
+    texto_propuesta = str((cuerpo or {}).get("texto") or "").strip()
+    if accion == "proponer" and not texto_propuesta:
+        return JSONResponse({"error": "texto requerido (ej. «jueves 10 am»)"}, status_code=400)
+
+    # Con `devolverTexto` Nea NO le escribe al cliente: regresa el texto y Vocero lo envía
+    # como mensaje de la persona que está en la conversación. Así funciona aunque la IA
+    # esté en pausa (el CRM rechaza los mensajes del bot en ese caso) y no se duplica.
+    devolver = bool((cuerpo or {}).get("devolverTexto"))
+    capturado: list[str] = []
+    token = _aviso_en_linea.set(capturado) if devolver else None
+    try:
+        if accion == "proponer":
+            mensaje = await proponer_horario(ctx, pending, texto_propuesta)
+        else:
+            mensaje = await resolver_aprobacion(ctx, pending, accion == "aprobar")
+    finally:
+        if token is not None:
+            _aviso_en_linea.reset(token)
     logger.info("citas_api: cita #%s → %s", cita_id, accion)
     despues = await ctx.store.get_pending_booking(cita_id)
-    return JSONResponse({"ok": True, "mensaje": mensaje, "estado": despues.estado if despues else None})
+    return JSONResponse({
+        "ok": True,
+        "mensaje": mensaje,
+        "estado": despues.estado if despues else None,
+        "textoCliente": capturado[-1] if capturado else None,
+    })

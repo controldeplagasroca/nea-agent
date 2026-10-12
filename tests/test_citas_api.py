@@ -118,3 +118,16 @@ async def test_accion_invalida_y_cita_inexistente():
         mala = await c.post(f"/vocero/citas/{pend.id}/resolver", json={"accion": "borrar"}, headers=SECRETO)
         falta = await c.post("/vocero/citas/9999/resolver", json={"accion": "aprobar"}, headers=SECRETO)
     assert mala.status_code == 400 and falta.status_code == 404
+
+
+@respx.mock
+async def test_con_devolver_texto_nea_no_escribe_y_regresa_el_texto_para_que_vocero_lo_envie():
+    ctx, pend, c = await _entorno()
+    envio = _crm()
+    async with c:
+        r = await c.post(f"/vocero/citas/{pend.id}/resolver",
+                         json={"accion": "aprobar", "devolverTexto": True}, headers=SECRETO)
+    datos = r.json()
+    assert datos["estado"] == "aprobado" and ctx.calendar.booking_calls  # el evento sí se crea
+    assert "quedó agendada" in datos["textoCliente"] and "Leopoldo" not in datos["textoCliente"]
+    assert envio.call_count == 0  # Nea no le escribió al cliente
