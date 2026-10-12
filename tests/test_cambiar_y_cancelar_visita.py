@@ -160,3 +160,22 @@ async def test_reagendar_una_visita_confirmada_sin_motivo_primero_lo_pregunta():
     res = await rt.execute("cambiar_visita", {"accion": "reagendar"})
     assert res["error"] == "falta_motivo" and "motivo" in res["instrucciones"]
     assert await ctx.store.list_pending_bookings_pendientes() == []
+
+
+async def test_con_precio_y_un_dia_pedido_no_se_hace_pase_a_persona():
+    """5 oct (Mariana): pidió «el jueves» con el precio aceptado y se le pasó el caso sin
+    horarios ni folio, así que nadie pudo confirmarle."""
+    rt, ctx = await _con_visita_confirmada("quiero la visita el jueves por favor")
+    rt.caso.cita = None
+    rt.caso.cotizacion = {"precio": 1750.0, "linea": "$1,750 MXN por visita", "bloque": "", "turno": 1}
+    res = await rt.execute("handoff", {"reason": "modelo", "nota": "quiere visita el jueves"})
+    assert res["error"] == "se_agenda_aqui" and "propose_slots" in res["instrucciones"]
+    assert rt.handoff_reason is None
+
+
+async def test_si_pide_hablar_con_una_persona_el_pase_sigue_funcionando():
+    rt, ctx = await _con_visita_confirmada("quiero hablar con una persona")
+    rt.caso.cita = None
+    rt.caso.cotizacion = {"precio": 1750.0, "linea": "$1,750 MXN por visita", "bloque": "", "turno": 1}
+    res = await rt.execute("handoff", {"reason": "cliente"})
+    assert res.get("ok") is True and rt.handoff_reason == "cliente"

@@ -1,9 +1,8 @@
 """Recordatorio de la visita al cliente, por plantilla de WhatsApp (Meta directo).
 
 Reglas del dueño:
-- Se manda ~24 h antes de la visita, solo entre 10:00 y 20:00 (hora de México): si
-  las 24 h caen antes de las 10, se espera a las 10:00.
-- Si la visita se agendó con menos de 24 h de anticipación, no hay recordatorio.
+- Se manda el día ANTERIOR a la visita, entre 8:00 y 12:00 (hora de México).
+- Si la visita se agendó ese mismo día del recordatorio, no hay: ya se le acaba de confirmar.
 - Una sola vez por horario; si se reagenda, la cita nueva tiene el suyo.
 - Respeta ALLOWED_WA_IDS (en pruebas no le escribe a nadie fuera de la lista).
 
@@ -25,22 +24,15 @@ from app.state import AppContext, CalendarBooking, utcnow
 
 logger = logging.getLogger("nea.visit_reminders")
 
-ANTICIPACION = timedelta(hours=24)
-HORA_DESDE, HORA_HASTA = 10, 20
-# Si el recordatorio se atoró (Meta caída) y la visita ya casi llega, ya no sirve.
-MARGEN_VISITA = timedelta(hours=2)
+HORA_DESDE, HORA_HASTA = 8, 12  # el recordatorio sale la mañana del día anterior
 
 
-def momento_de_envio(inicio_utc: datetime, tz) -> datetime:
-    """Cuándo toca mandar el recordatorio de una visita que empieza en `inicio_utc`."""
-    objetivo = (inicio_utc - ANTICIPACION).astimezone(tz)
-    if objetivo.hour < HORA_DESDE:
-        objetivo = objetivo.replace(hour=HORA_DESDE, minute=0, second=0, microsecond=0)
-    elif objetivo.hour >= HORA_HASTA:
-        objetivo = (objetivo + timedelta(days=1)).replace(
-            hour=HORA_DESDE, minute=0, second=0, microsecond=0
-        )
-    return objetivo.astimezone(timezone.utc)
+def ventana_de_envio(inicio_utc: datetime, tz) -> tuple[datetime, datetime]:
+    """(desde, hasta) en UTC: de 8:00 a 12:00 del día ANTERIOR a la visita."""
+    dia = inicio_utc.astimezone(tz).date() - timedelta(days=1)
+    desde = datetime(dia.year, dia.month, dia.day, HORA_DESDE, tzinfo=tz)
+    hasta = datetime(dia.year, dia.month, dia.day, HORA_HASTA, tzinfo=tz)
+    return desde.astimezone(timezone.utc), hasta.astimezone(timezone.utc)
 
 
 class VisitReminderWorker:
@@ -62,17 +54,14 @@ class VisitReminderWorker:
         now = now or utcnow()
         ctx = self._ctx
         tz = zona_agente(ctx.settings.agent_timezone)
-        local = now.astimezone(tz)
-        if not (HORA_DESDE <= local.hour < HORA_HASTA):
-            return 0
         enviados = 0
-        for booking in await ctx.store.list_bookings_for_visit_reminder(now + ANTICIPACION):
-            if booking.start_utc - now < MARGEN_VISITA:
+        # Las visitas de hoy y de mañana; cada una tiene su propia ventana.
+        for booking in await ctx.store.list_bookings_for_visit_reminder(now + timedelta(days=2)):
+            desde, hasta = ventana_de_envio(booking.start_utc, tz)
+            if not (desde <= now < hasta):
                 continue
-            if booking.created_at > booking.start_utc - ANTICIPACION:
-                continue  # se agendó con menos de 24 h: sin recordatorio
-            if now < momento_de_envio(booking.start_utc, tz):
-                continue
+            if booking.created_at >= desde:
+                continue  # se agendó ese mismo día: ya se le acaba de confirmar
             try:
                 if await self._enviar(booking, tz, now):
                     enviados += 1

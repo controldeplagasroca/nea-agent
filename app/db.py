@@ -601,6 +601,13 @@ class PgStore(PgDispatchStore):
         )
         return _pending_from_row(row) if row is not None else None
 
+    async def list_open_pending_bookings(self) -> list[PendingBooking]:
+        rows = await self.pool.fetch(
+            "SELECT * FROM pending_bookings "
+            "WHERE estado IN ('pendiente', 'esperando_cliente') ORDER BY id"
+        )
+        return [_pending_from_row(r) for r in rows]
+
     async def list_pending_bookings_pendientes(self) -> list[PendingBooking]:
         rows = await self.pool.fetch(
             "SELECT * FROM pending_bookings WHERE estado = 'pendiente' ORDER BY id"

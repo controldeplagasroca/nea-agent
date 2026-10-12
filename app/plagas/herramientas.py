@@ -439,6 +439,29 @@ class RuntimeDePlagas(ToolRuntime):
         razon = str(args.get("reason") or "").strip().lower()
         texto = self._texto_lead
         if (
+            self._ctx.calendar is not None
+            and self._ctx.settings.owner_identity
+            and self.caso.cotizacion is not None
+            and self.caso.cita is None
+            and razon != "hostilidad"
+            and not candados.pide_persona(texto)
+            and (
+                fecha_pedida(texto, datetime.now(_zona_del_negocio(self._ctx)).date())
+                or re.search(r"\b(agend|visita|horario|cita|disponib|vengan|pueden venir)", normalizar(texto))
+            )
+        ):
+            # 5 oct (Mariana): pidió «el jueves» con el precio aceptado y Nea le pasó el caso
+            # al dueño sin horarios ni folio: nadie pudo confirmarle. Se agenda aquí.
+            return {
+                "ok": False,
+                "error": "se_agenda_aqui",
+                "instrucciones": (
+                    "No pases este caso: el lead ya tiene su precio y quiere agendar. Llama "
+                    "propose_slots (con la fecha que pidió, si la dijo) y ofrécele los horarios "
+                    "libres. La visita se registra y se confirma con el técnico por el sistema."
+                ),
+            }
+        if (
             razon != "hostilidad"
             and hostility.is_hostile(texto)
             and self._racha_hostil < 3
@@ -1753,7 +1776,9 @@ class RuntimeDePlagas(ToolRuntime):
             # cliente la confirmación, y el CRM no deja escribir con la IA apagada.
             self.handoff_reason = "cliente"
             caso.escalado = f"Solicitud de visita: {dia}"
+        pago = re.search(r"\b(efectivo|transferencia|tarjeta|deposito)\b", normalizar(" ".join(self._mensajes_lead)))
         await self._ficha({
+            "pago_mencionado": pago.group(1) if pago else None,
             "cita_solicitada": dia,
             "calificado": True,
             "resultado": "agendo",

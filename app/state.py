@@ -310,6 +310,9 @@ class Store(Protocol):
     ) -> PendingBooking: ...
     async def get_pending_booking(self, pending_id: int) -> PendingBooking | None: ...
     async def list_pending_bookings_pendientes(self) -> list[PendingBooking]: ...
+    async def list_open_pending_bookings(self) -> list[PendingBooking]:
+        """Por aprobar ('pendiente') o esperando la respuesta del cliente."""
+        ...
     async def list_pending_bookings_for_conversation(
         self, conversation_id: int
     ) -> list[PendingBooking]:
@@ -635,6 +638,15 @@ class MemoryStore(MemoryDispatchStore):
 
     async def get_pending_booking(self, pending_id: int) -> PendingBooking | None:
         return self.pending_bookings.get(pending_id)
+
+    async def list_open_pending_bookings(self) -> list[PendingBooking]:
+        return sorted(
+            (
+                p for p in self.pending_bookings.values()
+                if p.estado in ("pendiente", "esperando_cliente")
+            ),
+            key=lambda p: p.id,
+        )
 
     async def list_pending_bookings_pendientes(self) -> list[PendingBooking]:
         return sorted(
