@@ -510,7 +510,8 @@ async def _resolver(ctx: AppContext, pending: PendingBooking, aprobado: bool) ->
     await _notificar_lead(
         ctx,
         pending,
-        f"¡Confirmado! ✅ Tu visita quedó agendada para el {_sin_relativo(pending.label)} en {pending.direccion}.",
+        f"¡Confirmado! ✅ Tu visita quedó agendada para el {_sin_relativo(pending.label)} en "
+        f"{pending.direccion}. Por este medio te confirmamos la fecha y el horario 📅",
     )
     return f"Listo, cita #{pending.id} confirmada y avisado al cliente ✅"
 

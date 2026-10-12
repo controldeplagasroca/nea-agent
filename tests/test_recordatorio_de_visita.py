@@ -10,7 +10,7 @@ import respx
 
 from app.horarios import zona_agente
 from app.meta_wa import MetaError, MetaWhatsApp
-from app.visit_reminders import VisitReminderWorker, momento_de_envio
+from app.visit_reminders import VisitReminderWorker, ventana_de_envio
 from tests.conftest import CRM_URL, IDENTITY, crm_context, make_ctx, make_settings
 
 TZ = zona_agente("America/Mexico_City")
@@ -46,12 +46,12 @@ def _crm(respx_mock):
     )
 
 
-def test_momento_de_envio_respeta_la_ventana_de_10_a_20():
-    assert momento_de_envio(VISITA, TZ) == HACE_24H  # 10:00 → 10:00 del día anterior
-    temprano = datetime(2026, 10, 7, 15, 0, tzinfo=timezone.utc)  # visita 9:00 local
-    assert momento_de_envio(temprano, TZ) == datetime(2026, 10, 6, 16, 0, tzinfo=timezone.utc)  # 10:00 local
-    tarde = datetime(2026, 10, 8, 3, 0, tzinfo=timezone.utc)  # visita 21:00 local → 21:00 del día anterior
-    assert momento_de_envio(tarde, TZ).astimezone(TZ).hour == 10
+def test_la_ventana_es_el_dia_anterior_de_8_a_12():
+    desde, hasta = ventana_de_envio(VISITA, TZ)  # visita miércoles 7, 10:00 local
+    assert desde == datetime(2026, 10, 6, 14, 0, tzinfo=timezone.utc)  # martes 6, 8:00 local
+    assert hasta == datetime(2026, 10, 6, 18, 0, tzinfo=timezone.utc)  # martes 6, 12:00 local
+    temprano = datetime(2026, 10, 7, 15, 0, tzinfo=timezone.utc)  # visita 9:00 local: misma ventana del día anterior
+    assert ventana_de_envio(temprano, TZ) == (desde, hasta)
 
 
 @respx.mock
@@ -78,28 +78,26 @@ async def test_manda_la_plantilla_con_los_datos_de_la_visita_una_sola_vez():
 
 
 @respx.mock
-async def test_no_manda_antes_de_tiempo_ni_fuera_de_ventana():
+async def test_solo_manda_el_dia_anterior_entre_8_y_12():
     ctx, _ = await _armar()
     _crm(respx)
     meta = respx.post(META_URL).mock(return_value=httpx.Response(200, json={"messages": [{"id": "x"}]}))
     worker = VisitReminderWorker(ctx)
-    assert await worker.tick(HACE_24H - timedelta(minutes=10)) == 0  # faltan más de 24 h
-    # visita de 9:00 → toca a las 10:00 locales, no a las 9:00
-    ctx2, _ = await _armar(inicio=datetime(2026, 10, 7, 15, 0, tzinfo=timezone.utc))
-    assert await VisitReminderWorker(ctx2).tick(datetime(2026, 10, 6, 15, 0, tzinfo=timezone.utc)) == 0
-    assert await VisitReminderWorker(ctx2).tick(datetime(2026, 10, 6, 16, 0, tzinfo=timezone.utc)) == 1
-    # de noche (21:00 local) nunca
-    ctx3, _ = await _armar()
-    assert await VisitReminderWorker(ctx3).tick(datetime(2026, 10, 7, 3, 0, tzinfo=timezone.utc)) == 0
-    assert meta.call_count == 1
+    dia = datetime(2026, 10, 6, tzinfo=timezone.utc)
+    assert await worker.tick(dia.replace(hour=13, minute=59)) == 0  # 7:59 local
+    assert await worker.tick(dia.replace(hour=18, minute=0)) == 0  # 12:00 local: ya cerró
+    assert await worker.tick(datetime(2026, 10, 5, 16, 0, tzinfo=timezone.utc)) == 0  # dos días antes
+    assert await worker.tick(datetime(2026, 10, 7, 14, 0, tzinfo=timezone.utc)) == 0  # el mismo día de la visita
+    assert meta.call_count == 0
+    assert await worker.tick(dia.replace(hour=14, minute=0)) == 1  # 8:00 local en punto
 
 
 @respx.mock
-async def test_cita_agendada_con_menos_de_24h_no_lleva_recordatorio():
-    ctx, cita = await _armar(agendada_hace=timedelta(hours=20))
+async def test_cita_agendada_el_mismo_dia_del_recordatorio_no_lleva_recordatorio():
+    ctx, cita = await _armar(agendada_hace=timedelta(hours=20))  # se agendó el martes en la tarde
     _crm(respx)
     meta = respx.post(META_URL).mock(return_value=httpx.Response(200, json={"messages": [{"id": "x"}]}))
-    assert await VisitReminderWorker(ctx).tick(HACE_24H + timedelta(hours=1)) == 0
+    assert await VisitReminderWorker(ctx).tick(HACE_24H) == 0
     assert meta.call_count == 0
 
 

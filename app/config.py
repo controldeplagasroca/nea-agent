@@ -197,6 +197,11 @@ class Settings(BaseSettings):
     # 503 (falla cerrado: escribe datos de clientes).
     roca_ops_sync_secret: str = ""
 
+    # Secreto con el que Vocero (el servidor de la bandeja) lista y resuelve las
+    # citas por aprobar: botón «Aprobar» del panel y el interruptor «Confirmar
+    # cita» del chat. Va en el header `X-Vocero-Secret`. Vacío = 503 (falla cerrado).
+    vocero_api_secret: str = ""
+
     # ── Agenda propia (Google Calendar) y aprobación del dueño ────────
     #
     # Con las dos variables de Google puestas, Nea ofrece los horarios del
